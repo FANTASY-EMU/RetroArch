@@ -240,7 +240,9 @@ class EmulatorKeyboardView: UIView {
        }
        
        key.translatesAutoresizingMaskIntoConstraints = false
-       key.widthAnchor.constraint(equalToConstant: (25 * CGFloat(keyCoded.keySize.rawValue))).isActive = true
+       let widthConstraint = key.widthAnchor.constraint(equalToConstant: (25 * CGFloat(keyCoded.keySize.rawValue)))
+       widthConstraint.priority = UILayoutPriority(999)
+       widthConstraint.isActive = true
        key.heightAnchor.constraint(equalToConstant: 35).isActive = true
        key.backgroundColor = EmulatorKeyboardView.keyNormalBackgroundColor
        key.layer.borderWidth = EmulatorKeyboardView.keyBorderWidth
@@ -271,8 +273,8 @@ class EmulatorKeyboardView: UIView {
         }
         let stack = UIStackView(arrangedSubviews: subviews)
         stack.axis = .horizontal
-        stack.distribution = .fill
-        stack.spacing = 8
+        stack.distribution = .fillProportionally
+        stack.spacing = 6
         return stack
     }
 }
