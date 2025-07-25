@@ -2787,15 +2787,34 @@ bool core_info_current_supports_savestate(void)
    core_info_state_t *p_coreinfo   = &core_info_st;
    settings_t        *settings     = config_get_ptr();
    bool core_info_savestate_bypass = settings->bools.core_info_savestate_bypass;
+   
+   /* 【Fantasy调试】打印存档支持检查信息 */
+   RARCH_LOG("[Fantasy Debug] === Savestate Support Check ===\n");
+   RARCH_LOG("[Fantasy Debug] core_info_savestate_bypass: %s\n", core_info_savestate_bypass ? "true" : "false");
+   
    if (core_info_savestate_bypass)
+   {
+      RARCH_LOG("[Fantasy Debug] Bypass enabled - returning true\n");
       return true;
+   }
    /* If no core is currently loaded, assume
     * by default that all savestate functionality
     * is supported */
    if (!p_coreinfo->current)
+   {
+      RARCH_LOG("[Fantasy Debug] No current core - returning true\n");
       return true;
-   return p_coreinfo->current->savestate_support_level >=
-         CORE_INFO_SAVESTATE_BASIC;
+   }
+   
+   RARCH_LOG("[Fantasy Debug] Current core: %s\n", p_coreinfo->current->core_name ? p_coreinfo->current->core_name : "Unknown");
+   RARCH_LOG("[Fantasy Debug] Savestate support level: %d (need >= %d)\n", 
+             p_coreinfo->current->savestate_support_level, CORE_INFO_SAVESTATE_BASIC);
+   
+   bool result = p_coreinfo->current->savestate_support_level >= CORE_INFO_SAVESTATE_BASIC;
+   RARCH_LOG("[Fantasy Debug] Final result: %s\n", result ? "SUPPORTED" : "NOT SUPPORTED");
+   RARCH_LOG("[Fantasy Debug] ================================\n");
+   
+   return result;
 }
 
 bool core_info_current_supports_rewind(void)

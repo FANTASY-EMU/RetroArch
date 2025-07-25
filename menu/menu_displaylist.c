@@ -3616,9 +3616,16 @@ static int menu_displaylist_parse_load_content_settings(
                0, 0, NULL))
             count++;
 
+      /* 【Fantasy调试】检查存档菜单显示条件 */
+      RARCH_LOG("[Fantasy Debug] === Savestate Menu Check ===\n");
+      RARCH_LOG("[Fantasy Debug] savestates_enabled: %s\n", savestates_enabled ? "true" : "false");
+      RARCH_LOG("[Fantasy Debug] quick_menu_show_savestate_submenu: %s\n", 
+                settings->bools.quick_menu_show_savestate_submenu ? "true" : "false");
+      
       if (     savestates_enabled
             && settings->bools.quick_menu_show_savestate_submenu)
       {
+         RARCH_LOG("[Fantasy Debug] Adding Save States menu item\n");
          if (menu_entries_append(list,
                msg_hash_to_str(MENU_ENUM_LABEL_VALUE_SAVESTATE_LIST),
                msg_hash_to_str(MENU_ENUM_LABEL_SAVESTATE_LIST),
@@ -3628,6 +3635,7 @@ static int menu_displaylist_parse_load_content_settings(
       }
       else if (savestates_enabled)
       {
+         RARCH_LOG("[Fantasy Debug] Save States submenu disabled, showing individual items\n");
          if (settings->bools.quick_menu_show_save_load_state)
          {
             if (MENU_DISPLAYLIST_PARSE_SETTINGS_ENUM(list,
@@ -3765,6 +3773,11 @@ static int menu_displaylist_parse_load_content_settings(
             }
          }
       }
+      else
+      {
+         RARCH_LOG("[Fantasy Debug] Save States menu NOT added - savestates not enabled\n");
+      }
+      RARCH_LOG("[Fantasy Debug] ==============================\n");
 
 #ifdef HAVE_BSV_MOVIE
       if (     savestates_enabled
