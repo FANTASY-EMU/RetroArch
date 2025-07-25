@@ -527,8 +527,21 @@ void cocoa_file_load_with_detect_core(const char *filename);
       settings_t *settings               = config_get_ptr();
       RAScreen *screen                   = (BRIDGE RAScreen*)cocoa_screen_get_chosen();
       CGRect screenSize                  = [screen bounds];
-      UIEdgeInsets inset                 = [[UIApplication sharedApplication] delegate].window.safeAreaInsets;
-      UIInterfaceOrientation orientation = [[UIApplication sharedApplication] statusBarOrientation];
+      
+      // 使用更安全的方式获取 safeAreaInsets，避免访问可能为 nil 的 AppDelegate.window
+      UIEdgeInsets inset                 = self.view.safeAreaInsets;
+      
+      // 使用更安全的方式获取屏幕方向
+      UIInterfaceOrientation orientation = UIInterfaceOrientationPortrait;
+      if (@available(iOS 13.0, *)) {
+          // iOS 13+ 使用 windowScene 获取方向
+          if (self.view.window && self.view.window.windowScene) {
+              orientation = self.view.window.windowScene.interfaceOrientation;
+          }
+      } else {
+          // iOS 13以下使用传统方法
+          orientation = [[UIApplication sharedApplication] statusBarOrientation];
+      }
 
       if (settings->bools.video_notch_write_over_enable)
       {
