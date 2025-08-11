@@ -62,6 +62,10 @@ uintptr_t rcheevos_get_badge_texture(const char* badge, bool locked, bool downlo
 
 uint8_t* rcheevos_patch_address(unsigned address);
 
+/* 桥接函数：返场模式控制 */
+void rcheevos_set_encore_mode(bool enabled);
+bool rcheevos_get_encore_mode(void);
+
 RETRO_END_DECLS
 
 #endif /* __RARCH_CHEEVOS_CHEEVOS_H */

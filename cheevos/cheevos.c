@@ -371,6 +371,37 @@ static void rcheevos_award_achievement(const rc_client_achievement_t* cheevo)
       }
    }
 #endif
+
+   /* 打印详细的成就解锁信息到日志 (防重复机制) */
+   {
+      static unsigned int last_logged_achievement = 0;
+      static time_t last_logged_time = 0;
+      time_t current_time = time(NULL);
+      
+      /* 如果是同一个成就并且在1秒内，跳过重复日志 */
+      if (last_logged_achievement == cheevo->id && (current_time - last_logged_time) < 2) {
+         CHEEVOS_LOG(RCHEEVOS_TAG "[CHEEVOS-UNLOCK] 跳过重复的成就解锁日志: %u\n", cheevo->id);
+         return;
+      }
+      
+      last_logged_achievement = cheevo->id;
+      last_logged_time = current_time;
+      
+      float rarity = rc_client_get_hardcore_enabled(rcheevos_locals.client) ?
+         cheevo->rarity_hardcore : cheevo->rarity;
+      bool is_rare = (rarity > 0.0 && rarity < 10.0);
+      
+      CHEEVOS_LOG(RCHEEVOS_TAG "[CHEEVOS-UNLOCK] 🏆 成就解锁！\n");
+      CHEEVOS_LOG(RCHEEVOS_TAG "[CHEEVOS-UNLOCK] 标题: %s\n", cheevo->title);
+      CHEEVOS_LOG(RCHEEVOS_TAG "[CHEEVOS-UNLOCK] 描述: %s\n", cheevo->description);
+      CHEEVOS_LOG(RCHEEVOS_TAG "[CHEEVOS-UNLOCK] 分数: %d\n", cheevo->points);
+      CHEEVOS_LOG(RCHEEVOS_TAG "[CHEEVOS-UNLOCK] 稀有度: %.2f%%\n", rarity);
+      CHEEVOS_LOG(RCHEEVOS_TAG "[CHEEVOS-UNLOCK] 类型: %s\n", is_rare ? "稀有成就" : "普通成就");
+      CHEEVOS_LOG(RCHEEVOS_TAG "[CHEEVOS-UNLOCK] 成就ID: %u\n", cheevo->id);
+      CHEEVOS_LOG(RCHEEVOS_TAG "[CHEEVOS-UNLOCK] 硬核模式: %s\n", 
+         rc_client_get_hardcore_enabled(rcheevos_locals.client) ? "是" : "否");
+      CHEEVOS_LOG(RCHEEVOS_TAG "[CHEEVOS-UNLOCK] ==========================================\n");
+   }
 }
 
 static void rcheevos_lboard_submitted(const rc_client_leaderboard_t* lboard,
@@ -564,6 +595,28 @@ static void rcheevos_client_event_handler(const rc_client_event_t* event, rc_cli
 #endif
    case RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED:
       rcheevos_award_achievement(event->achievement);
+      
+      /* 调用桥接层的成就解锁回调 */
+      {
+         extern void pvretroarch_achievement_unlocked_callback(const char* title, const char* description, 
+                                                              int points, float rarity, unsigned int achievement_id, bool is_hardcore, const char* badge_name);
+         
+         if (event->achievement && pvretroarch_achievement_unlocked_callback) {
+            float rarity = rc_client_get_hardcore_enabled(rcheevos_locals.client) ?
+               event->achievement->rarity_hardcore : event->achievement->rarity;
+            bool is_hardcore = rc_client_get_hardcore_enabled(rcheevos_locals.client);
+            
+            pvretroarch_achievement_unlocked_callback(
+               event->achievement->title,
+               event->achievement->description,
+               event->achievement->points,
+               rarity,
+               event->achievement->id,
+               is_hardcore,
+               event->achievement->badge_name
+            );
+         }
+      }
       break;
    case RC_CLIENT_EVENT_LEADERBOARD_STARTED:
       rcheevos_lboard_started(event->leaderboard);
@@ -653,10 +706,29 @@ void rcheevos_reset_game(bool widgets_ready)
       rcheevos_init_memory(&rcheevos_locals);
 }
 
+
+
 void rcheevos_refresh_memory(void)
 {
    if (rcheevos_locals.memory.total_size > 0)
       rcheevos_init_memory(&rcheevos_locals);
+}
+
+/* 桥接函数：设置返场模式（供桥接层调用） */
+void rcheevos_set_encore_mode(bool enabled)
+{
+   if (rcheevos_locals.client) {
+      rc_client_set_encore_mode_enabled(rcheevos_locals.client, enabled ? 1 : 0);
+   }
+}
+
+/* 桥接函数：获取返场模式状态（供桥接层调用） */
+bool rcheevos_get_encore_mode(void)
+{
+   if (rcheevos_locals.client) {
+      return rc_client_get_encore_mode_enabled(rcheevos_locals.client) != 0;
+   }
+   return false;
 }
 
 bool rcheevos_hardcore_active(void)
@@ -1484,6 +1556,44 @@ static void rcheevos_client_load_game_callback(int result,
 
       /* have valid memory now. use the real read function */
       rc_client_set_read_memory_function(client, rcheevos_client_read_memory);
+   }
+
+   /*
+    * 确保“游戏图标”进入下载队列：
+    *  - 远端 URL 形如 /Images/{badge}.png（不带 i 前缀）
+    *  - 本地缓存文件名为 i{badge}.png，目录 thumbnails/cheevos/badges/
+    *  - 若目标文件已存在，下载实现会自动跳过
+    */
+   rcheevos_client_download_game_badge(game);
+
+   /*
+    * 通知 iOS (Swift) 层：游戏识别成功
+    * 说明：
+    *  - Swift 层会展示提示卡片，并尝试从本地读取 i{badge}.png
+    *  - 若本地不存在，Swift 层有兜底的远程下载；通常会被底层的下载先行命中
+    */
+   {
+      /* Forward declaration for bridge callback (implemented in PVRetroArchCoreBridge) */
+      extern void pvretroarch_game_recognized_callback(const char* game_title,
+         unsigned int game_id, const char* badge_name,
+         unsigned int total_achievements, unsigned int total_points);
+
+      const rc_client_game_t *ginfo = rc_client_get_game_info(client);
+      if (ginfo)
+      {
+         rc_client_user_game_summary_t summary;
+         memset(&summary, 0, sizeof(summary));
+         rc_client_get_user_game_summary(client, &summary);
+
+         /* Use core achievements/points as totals */
+         pvretroarch_game_recognized_callback(
+            ginfo->title ? ginfo->title : "",
+            ginfo->id,
+            ginfo->badge_name,
+            summary.num_core_achievements,
+            summary.points_core
+         );
+      }
    }
 
    rcheevos_finalize_game_load(client);
