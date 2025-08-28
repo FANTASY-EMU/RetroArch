@@ -1573,7 +1573,7 @@ static void rcheevos_client_load_game_callback(int result,
     *  - 若本地不存在，Swift 层有兜底的远程下载；通常会被底层的下载先行命中
     */
    {
-      /* Forward declaration for bridge callback (implemented in PVRetroArchCoreBridge) */
+      /* Forward declaration for bridge callback (implemented in PocketRACoreBridge) */
       extern void pvretroarch_game_recognized_callback(const char* game_title,
          unsigned int game_id, const char* badge_name,
          unsigned int total_achievements, unsigned int total_points);

@@ -11,7 +11,7 @@
 #include "../common/vulkan_common.h"
 #include "../../verbosity.h"
 #if defined(HAVE_COCOATOUCH) || defined(TARGET_OS_TV)
-#include "../../../PVRetroArchCore/Core/vulkan_ios_tvos_helpers.h"
+#include "../../../PocketRACore/Core/vulkan_ios_tvos_helpers.h"
 #endif
 
 #ifdef VULKAN_HDR_SWAPCHAIN
