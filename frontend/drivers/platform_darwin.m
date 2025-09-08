@@ -123,7 +123,7 @@ static void CFSearchPathForDirectoriesInDomains(
 #if TARGET_OS_TV
    NSSearchPathDirectory dir = NSCachesDirectory;
 #else
-   NSSearchPathDirectory dir = NSDocumentDirectory;
+   NSSearchPathDirectory dir = NSLibraryDirectory;
 #endif
 #if __has_feature(objc_arc)
    CFStringRef array_val     = (__bridge CFStringRef)[
@@ -715,7 +715,7 @@ static int frontend_darwin_parse_drive_list(void *data, bool load_content)
 #if TARGET_OS_TV
             "~/Library/Caches/RetroArch",
 #else
-            "~/Documents/RetroArch",
+            "~/Library/RetroArch",
 #endif
             msg_hash_to_str(MENU_ENUM_LABEL_FILE_DETECT_CORE_LIST_PUSH_DIR),
             enum_idx,

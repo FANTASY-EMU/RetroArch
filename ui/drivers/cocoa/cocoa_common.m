@@ -395,7 +395,7 @@ void cocoa_file_load_with_detect_core(const char *filename);
    char fullpath[PATH_MAX_LENGTH] = {0};
    fill_pathname_join_special(fullpath, settings->paths.directory_core_assets, [filename UTF8String], sizeof(fullpath));
    NSString  *destination = [NSString stringWithUTF8String:fullpath];
-   NSString *documentsDir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+   NSString *documentsDir = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES).firstObject;
    /* Copy file to documents directory if it's not already
     * inside Documents directory */
    if (![[url path] containsString:documentsDir])
