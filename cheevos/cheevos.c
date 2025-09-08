@@ -598,15 +598,15 @@ static void rcheevos_client_event_handler(const rc_client_event_t* event, rc_cli
       
       /* 调用桥接层的成就解锁回调 */
       {
-         extern void pvretroarch_achievement_unlocked_callback(const char* title, const char* description, 
+         extern void pocketra_achievement_unlocked_callback(const char* title, const char* description, 
                                                               int points, float rarity, unsigned int achievement_id, bool is_hardcore, const char* badge_name);
          
-         if (event->achievement && pvretroarch_achievement_unlocked_callback) {
+         if (event->achievement && pocketra_achievement_unlocked_callback) {
             float rarity = rc_client_get_hardcore_enabled(rcheevos_locals.client) ?
                event->achievement->rarity_hardcore : event->achievement->rarity;
             bool is_hardcore = rc_client_get_hardcore_enabled(rcheevos_locals.client);
             
-            pvretroarch_achievement_unlocked_callback(
+            pocketra_achievement_unlocked_callback(
                event->achievement->title,
                event->achievement->description,
                event->achievement->points,
@@ -1574,7 +1574,7 @@ static void rcheevos_client_load_game_callback(int result,
     */
    {
       /* Forward declaration for bridge callback (implemented in PocketRACoreBridge) */
-      extern void pvretroarch_game_recognized_callback(const char* game_title,
+      extern void pocketra_game_recognized_callback(const char* game_title,
          unsigned int game_id, const char* badge_name,
          unsigned int total_achievements, unsigned int total_points);
 
@@ -1586,7 +1586,7 @@ static void rcheevos_client_load_game_callback(int result,
          rc_client_get_user_game_summary(client, &summary);
 
          /* Use core achievements/points as totals */
-         pvretroarch_game_recognized_callback(
+         pocketra_game_recognized_callback(
             ginfo->title ? ginfo->title : "",
             ginfo->id,
             ginfo->badge_name,
