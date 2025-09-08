@@ -25,6 +25,11 @@
 #include <process.h>
 #endif
 
+#if defined(_WIN32_WINNT) && _WIN32_WINNT >= 0x0600
+#include <winreg.h>
+#include <winerror.h>
+#endif
+
 #include <boolean.h>
 #include <compat/strl.h>
 #include <dynamic/dylib.h>
@@ -256,13 +261,13 @@ static void gfx_set_dwm(void)
 
    if (!composition_enable)
    {
-      RARCH_ERR("Did not find DwmEnableComposition ...\n");
+      RARCH_ERR("Did not find DwmEnableComposition.\n");
       return;
    }
 
    ret = composition_enable(!disable_composition);
    if (FAILED(ret))
-      RARCH_ERR("Failed to set composition state ...\n");
+      RARCH_ERR("Failed to set composition state.\n");
    if (disable_composition)
       g_plat_win32_flags |= PLAT_WIN32_FLAG_DWM_COMPOSITION_DISABLED;
 }
@@ -278,15 +283,24 @@ static size_t frontend_win32_get_os(char *s, size_t len, int *major, int *minor)
    /* Windows 2000 and later */
    SYSTEM_INFO si         = {{0}};
    OSVERSIONINFOEX vi     = {0};
+#ifndef _MSC_VER
+   /* Vista and later, MSYS2/MINGW64 build */
+   const char win_ver_reg_key[]    = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+   const DWORD reg_read_flags      = RRF_RT_REG_SZ; /* Only read strings (REG_SZ) */
+   const int ProductName_2nd_digit = 9; /* second digit in the string 'Windows 10' */
+   char str_ProductName[64]        = {0};
+   char str_DisplayVersion[64]     = {0};
+   char str_LCUVer[64]             = {0};
+   DWORD key_type                  = 0; /* null pointer */
+   DWORD data_size                 = 0;
+   long reg_read_result;
+   bool read_success               = TRUE;
+   /* end Vista and later; still within Windows 2000 and later block */
+#endif
+
    vi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
 
    GetSystemInfo(&si);
-
-   /* Available from NT 3.5 and Win95 */
-   GetVersionEx((OSVERSIONINFO*)&vi);
-
-   server = vi.wProductType != VER_NT_WORKSTATION;
-
    switch (si.wProcessorArchitecture)
    {
       case PROCESSOR_ARCHITECTURE_AMD64:
@@ -301,6 +315,74 @@ static size_t frontend_win32_get_os(char *s, size_t len, int *major, int *minor)
       default:
          break;
    }
+
+#ifndef _MSC_VER
+   /* Vista and later, MSYS2/MINGW64 build
+    * Check for Win11 by looking for a specific Registry value.
+    * The behavior of GetVersionEx is changed under Win11 and no longer provides
+    * relevant data. If the specific Registry value is present, read version data
+    * directly from registry and skip remainder of function.
+    * Each read is paired for string values; the first gets the size of the
+    * string (read into data_size); the second passes data_size back as an
+    * argument and reads the actual string. */
+   reg_read_result = RegGetValue(HKEY_LOCAL_MACHINE, win_ver_reg_key, "LCUVer",
+         reg_read_flags, &key_type, 0, &data_size);
+   
+   if (reg_read_result == ERROR_SUCCESS)
+   {
+      if (RegGetValue(HKEY_LOCAL_MACHINE, win_ver_reg_key, "LCUVer",
+            reg_read_flags, &key_type, str_LCUVer, &data_size) != ERROR_SUCCESS)
+         read_success = FALSE;
+
+      if (RegGetValue(HKEY_LOCAL_MACHINE, win_ver_reg_key, "ProductName",
+            reg_read_flags, &key_type, 0, &data_size) != ERROR_SUCCESS)
+         read_success = FALSE;
+      
+      if (RegGetValue(HKEY_LOCAL_MACHINE, win_ver_reg_key, "ProductName",
+            reg_read_flags, &key_type, str_ProductName, &data_size) != ERROR_SUCCESS)
+         read_success = FALSE;
+
+      if (RegGetValue(HKEY_LOCAL_MACHINE, win_ver_reg_key, "DisplayVersion",
+            reg_read_flags, &key_type, 0, &data_size) != ERROR_SUCCESS)
+         read_success = FALSE;
+
+      if (RegGetValue(HKEY_LOCAL_MACHINE, win_ver_reg_key, "DisplayVersion",
+            reg_read_flags, &key_type, str_DisplayVersion, &data_size) != ERROR_SUCCESS)
+         read_success = FALSE;
+
+      if (read_success)
+      {
+         str_ProductName[ProductName_2nd_digit] = '1';
+         /* Even the version in the Registry still says Windows 10 and requires
+          * string manipulation. */
+         
+          _len = strlcpy(s, str_ProductName, len);
+
+         if (!string_is_empty(arch))
+         {
+            _len += strlcpy(s + _len, " ",  len - _len);
+            _len += strlcpy(s + _len, arch, len - _len);
+         }
+         _len = strlcpy(s + _len, " ", len - _len);
+         _len = strlcpy(s + _len, str_DisplayVersion, len - _len);
+         _len = strlcpy(s + _len, " (", len - _len);
+         _len = strlcpy(s + _len, str_LCUVer, len - _len);
+         _len = strlcpy(s + _len, ")", len - _len);
+
+         *major = 10;
+         *minor = 0;
+         
+         return _len;
+      }
+   }
+   /* End registry-check-and-read code; still within 2000-and-later block */
+#endif
+
+   /* GetVersionEx call changed in Win2K and later */
+   GetVersionEx((OSVERSIONINFO*)&vi);
+
+   server = vi.wProductType != VER_NT_WORKSTATION;
+
 #else
    OSVERSIONINFO vi = {0};
    vi.dwOSVersionInfoSize = sizeof(OSVERSIONINFO);
@@ -811,7 +893,7 @@ static void frontend_win32_respawn(char *s, size_t len, char *args)
 
    if (!CreateProcess(executable_path, GetCommandLine(),
          NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
-      RARCH_ERR("Failed to restart RetroArch\n");
+      RARCH_ERR("Failed to restart RetroArch.\n");
 }
 
 static bool frontend_win32_set_fork(enum frontend_fork fork_mode)
@@ -835,6 +917,7 @@ static bool frontend_win32_set_fork(enum frontend_fork fork_mode)
 #endif
 
 #if defined(_WIN32) && !defined(_XBOX)
+#if 0
 static const char *accessibility_win_language_id(const char* language)
 {
    if (string_is_equal(language,"en"))
@@ -899,6 +982,7 @@ static const char *accessibility_win_language_id(const char* language)
       return "405";
    return "";
 }
+#endif
 
 static const char *accessibility_win_language_code(const char* language)
 {
@@ -1053,7 +1137,7 @@ static bool is_narrator_running_windows(void)
          /* The running nvda service wasn't found, so revert
             back to the powershell method
          */
-         RARCH_ERR("Error communicating with NVDA\n");
+         RARCH_ERR("Error communicating with NVDA.\n");
          g_plat_win32_flags |=  PLAT_WIN32_FLAG_USE_POWERSHELL;
          g_plat_win32_flags &= ~PLAT_WIN32_FLAG_USE_NVDA;
          return false;
@@ -1082,10 +1166,10 @@ static bool accessibility_speak_windows(int speed,
    char cmd[512];
    const char *voice      = get_user_language_iso639_1(true);
    const char *language   = accessibility_win_language_code(voice);
+#if 0
    const char *langid     = accessibility_win_language_id(voice);
-   bool res               = false;
-   const char* speeds[10] = {"-10", "-7.5", "-5", "-2.5", "0", "2", "4", "6", "8", "10"};
-   size_t nbytes_cmd      = 0;
+#endif
+   const char *speeds[10] = {"-10", "-7.5", "-5", "-2.5", "0", "2", "4", "6", "8", "10"};
    if (speed < 1)
       speed               = 1;
    else if (speed > 10)
@@ -1102,8 +1186,8 @@ static bool accessibility_speak_windows(int speed,
 
    if (g_plat_win32_flags & PLAT_WIN32_FLAG_USE_POWERSHELL)
    {
-      const char * template_lang = "powershell.exe -NoProfile -WindowStyle Hidden -Command \"Add-Type -AssemblyName System.Speech; $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; $synth.SelectVoice(\\\"%s\\\"); $synth.Rate = %s; $synth.Speak($input);\"";
-      const char * template_nolang = "powershell.exe -NoProfile -WindowStyle Hidden -Command \"Add-Type -AssemblyName System.Speech; $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; $synth.Rate = %s; $synth.Speak($input);\"";
+      const char *template_lang = "powershell.exe -NoProfile -WindowStyle Hidden -Command \"Add-Type -AssemblyName System.Speech; $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; $synth.SelectVoice(\\\"%s\\\"); $synth.Rate = %s; $synth.Speak($input);\"";
+      const char *template_nolang = "powershell.exe -NoProfile -WindowStyle Hidden -Command \"Add-Type -AssemblyName System.Speech; $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; $synth.Rate = %s; $synth.Speak($input);\"";
       if (language && language[0] != '\0')
          snprintf(cmd, sizeof(cmd), template_lang, language, speeds[speed-1]);
       else
@@ -1123,7 +1207,7 @@ static bool accessibility_speak_windows(int speed,
 
       if (!wc || res != 0)
       {
-         RARCH_ERR("Error communicating with NVDA\n");
+         RARCH_ERR("Error communicating with NVDA.\n");
          /* Fallback on powershell immediately and retry */
          g_plat_win32_flags &= ~PLAT_WIN32_FLAG_USE_NVDA;
          g_plat_win32_flags |= PLAT_WIN32_FLAG_USE_POWERSHELL;

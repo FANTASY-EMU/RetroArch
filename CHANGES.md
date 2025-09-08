@@ -1,5 +1,49 @@
 # Future
+- APPLE: Include sameduck, gearcoleco, geargrafx core in App Store builds
+- AUDIO: Microphone CoreAudio driver for iOS and macOS
+- CAMERA: Use ffmpeg libavfilter virtual input device as default
+- CHEEVOS: Show additional message for unsupported achievements
+- CLOUDSYNC: Enable icloud_drive cloud sync backend on MacOS / iOS
+- CLOUDSYNC: Don't always trust the server hash
+- CLOUDSYNC: Enable WebDAV support for Android
+- EMSCRIPTEN: Support suspend screensaver
+- EMSCRIPTEN/RWEBCAM: Fix camera driver
+- EMSCRIPTEN/RWEBINPUT: Add accelerometer/gyroscope support
+- EMSCRIPTEN/RWEBPAD: Add rumble support
+- EMSCRIPTEN/RWEBAUDIO: Rewrite driver, set as default audio driver
+- INPUT: Default key and mouse binds for lightgun Start and Select buttons
+- INPUT: Turbo mode corrections
+- INPUT: Turbo fire settings are now saved to remaps, not to overrides
+- INPUT: Fix menu usage when OK/Cancel has mouse binds
+- INPUT: Ignore menu mouse startup position before moving
+- INPUT: Fix heavy slowdown when using Bluetooth XInput controllers with rumble
+- INPUT/UDEV: Fix lost terminal settings after restart from menu
+- MENU: Common Thumbnail Background option for all menu drivers
+- MENU: Move core options reset from Settings/Configuration to Main Menu / Configuration Files
+- MENU: Use right analog stick for thumbnail cycling in playlists
+- MENU: Option to always suggest cores, even when a core is already loaded
+- MENU: Option to show Favorites before History
+- MENU: Media history playlists are now visible in playlist manager
+- MENU: Import Content visibility defaults reverted
+- MENU: Update CRTSwitchRes menu options for future use
+- MENU/XMB: Select button toggles thumbnails in playlists
+- MENU/XMB,OZONE: Fix content icons when playlist tabs are hidden
+- NETWORK: Fixes for nmcli wifi driver
+- NETWORK: Network command interface enabled for Android, iOS, TVOS
+- SAVESTATES: Savestate thumbnails are default enabled for x86_64 builds
+- VIDEO: Fix auto swap interval setup
+- VIDEO: Improvements for integer scale half scaling
+- VIDEO/SHADER: Shader hold function, useful for some lightguns and shader comparison
+- VIDEO/WAYLAND: Support for xdg-toplevel-icon-v1
+- WEBOS: Various fixes and tunings
+- WEBOS: Disable core dumps
+
+# 1.21.0
 - 3DS: Fix unique IDs for newer cores
+- 3DS: Enable TLS (SSL)
+- 3DS: Fix UI freeze when threaded rendering is enabled
+- 3DS: Fix crash on load content
+- 3DS: Other minor fixes
 - APPLE: Enable Vulkan emulated mailbox
 - APPLE: Include b2 core in App Store builds
 - APPLE: CoreMIDI driver for IOS/MacOS
@@ -13,16 +57,23 @@
 - AUDIO/PIPEWIRE: Pass the new rate to the audio driver
 - CAMERA: Add PipeWire camera driver
 - CAMERA: Add ffmpeg camera driver
+- CHEAT: Rewrite part of cheat_manager_load_cb_second_pass()
 - CHEEVOS: Include achievement state in netplay states
 - CHEEVOS: Fix crash when entering achievements in quick menu while client is not present
+- CHEEVOS: Restore cheevos_badges_enable for HAVE_GFX_WIDGETS builds
 - CLI: Allow --entryslot to fall back to normal states
 - CLOUDSYNC: Fix Windows path issues
 - CLOUDSYNC: Workaround for duplicated requests bug
 - CLOUDSYNC: Workaround for 301 redirects
 - CLOUDSYNC: Handle ignored directories properly
+- EMSCRIPTEN: Added new AudioWorklet driver, a fast callback-based audio driver
 - EMSCRIPTEN: Scale window to correct size
 - EMSCRIPTEN: Additional platform functions
+- EMSCRIPTEN: Add new default video context driver: emscriptenwebgl_ctx
+- EMSCRIPTEN: Add new audio driver: AudioWorklet
+- EMSCRIPTEN: Add new modernized web player which will eventually replace the existing one
 - EMSCRIPTEN/RWEBINPUT: Add touch input support
+- GAMECUBE: Fixes
 - GENERAL: Fix save state auto increment
 - GENERAL: Fix softpatching with periods/dots in the file name
 - GENERAL: Fix compilation with --enable-videocore
@@ -41,12 +92,16 @@
 - INPUT/COCOA: Allow mouse input while mouse overlay is active
 - INPUT/WINRAW: Invert mouse index order
 - IOS: Ensure webserver notice can be dismissed
+- IOS: Fix rescanning manual playlists after app update
 - IOS: Fix clean playlist function
 - IOS: Fix crash when scanning
 - IOS: Fix jump back to selected item when closing content
 - IOS: Fix shared GL context setup
 - IOS: Update Launch Screen
+- IOS: Screen orientation lock through display server
+- IOS: Fix rescanning manual playlists after app update
 - LAKKA: Remove bluetooth device after disconnection
+- LINUX/X11: Extend X11 input driver with XInput2 extensions for multi-mouse
 - MACOS: Fix some sandbox handling in App Store builds
 - MACOS: Reset keyboard state when focus is lost
 - MENU: Add SSL support to the information list
@@ -70,13 +125,19 @@
 - MENU/XMB: Fix Light theme, font shadow
 - MENU/XMB: Appearance menu cleanup
 - MENU/XMB: Icon thumbnail can be any of the existing types
+- MISC: Guard nanosleep prototype behind _POSIX_TIMERS
+- MISC: Use fabsf and intended threshold for refresh rate check
+- MISC: Use platform-specific checks for invalid descriptors
 - MIDI: Add dropdown items for midi device selection
 - NETWORK: Refactor of net_http, improvements for task blocking and performance
 - NETWORK: Follow http redirects in net_http
 - NETWORK: Expire failed DNS lookups much faster
 - NETWORK: Fix netplay when using netpacket interface with recent cheevos
+- NETWORK/HTTP: Fix crash in net_http_resolve() in single-thread mode
+- OVERLAY: Fix overlay lightgun, mouse & pointer
 - OVERLAY: Preferred overlay loading is now default only on mobile platforms
 - OVERLAY: Improve analog recentering when touching the area just outside the recentering zone
+- QT: Enable non-png thumbnails also for Qt interface
 - REPLAY: Fix issue when replaying old format input recordings in newer RetroArch
 - TTS: Fix initial text-to-speech on Windows
 - TVOS: Fix 720p display
@@ -87,7 +148,15 @@
 - VIDEO: Enable BFI setting for mobile platforms (mind the warnings)
 - VIDEO/OpenGLES: Fix FP/sRGB FBO support
 - VIDEO/SHADERS: Allow exact refresh rate sync with shader subframes
+- VIDEO/SHADERS: FIX shader wildcards
 - VIDEO/VULKAN: Enable adaptive vsync
+- VIDEO/V4L2: Added resolution picker/forcing.
+- VIDEO/V4L2: Rewrote logic for finding ALSA audio devices in enumerate_audio_devices function
+- VIDEO/V4L2: Added a skip for some of the interface queries that fail and aren't required for magewell usb.
+- VITA: Fixes
+- WINDOWS: Win32 socket improvements
+- WII: Fixes
+- WIIU: Fixes
 - WEBPLAYER: Update core list for 1.20.0
 
 # 1.20.0

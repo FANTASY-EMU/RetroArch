@@ -43,11 +43,6 @@ static id<CHHapticPatternPlayer> deviceWeakPlayer IPHONE_RUMBLE_AVAIL;
 static id<CHHapticPatternPlayer> deviceStrongPlayer IPHONE_RUMBLE_AVAIL;
 #endif
 
-enum
-{
-    GCCONTROLLER_PLAYER_INDEX_UNSET = -1,
-};
-
 @class MFIRumbleController;
 
 /* TODO/FIXME - static globals */
@@ -356,14 +351,6 @@ static void mfi_joypad_autodetect_add(unsigned autoconf_pad, const char *display
     [self.engines addObject:engine];
 
     __weak MFIRumbleController *weakSelf = self;
-    engine.stoppedHandler = ^(CHHapticEngineStoppedReason stoppedReason)
-    {
-        MFIRumbleController *strongSelf = weakSelf;
-        if (!strongSelf)
-            return;
-
-        [strongSelf shutdown];
-    };
     engine.resetHandler = ^{
         MFIRumbleController *strongSelf = weakSelf;
         if (!strongSelf)
@@ -416,9 +403,13 @@ static void mfi_joypad_autodetect_add(unsigned autoconf_pad, const char *display
 {
     if (@available(iOS 14, tvOS 14, macOS 11, *))
     {
-        _weakPlayer   = nil;
-        _strongPlayer = nil;
+        for (CHHapticEngine *eng in self.engines)
+            eng.resetHandler = ^{};
         [self.engines removeAllObjects];
+        if (_weakPlayer) [_weakPlayer cancelAndReturnError:nil];
+        _weakPlayer   = nil;
+        if (_strongPlayer) [_strongPlayer cancelAndReturnError:nil];
+        _strongPlayer = nil;
     }
 }
 
@@ -438,35 +429,35 @@ static void apple_gamecontroller_joypad_connect(GCController *controller)
 
     if (mfi_controller_is_siri_remote(controller))
     {
-        RARCH_WARN("[mfi] ignoring siri remote as a controller\n");
+        RARCH_WARN("[MFI] Ignoring siri remote as a controller.\n");
         return;
     }
 
     /* Prevent same controller getting set twice */
     if ([mfiControllers containsObject:controller])
     {
-        RARCH_DBG("[mfi] got connected notice for controller already connected\n");
+        RARCH_DBG("[MFI] Got connected notice for controller already connected.\n");
         return;
     }
 
     if (@available(macOS 11, iOS 14, tvOS 14, *))
     {
-        RARCH_DBG("[mfi] new controller connected:\n");
-        RARCH_DBG("[mfi]    name: %s\n", [controller.vendorName UTF8String]);
-        RARCH_DBG("[mfi]    category: %s\n", [controller.productCategory UTF8String]);
-        RARCH_DBG("[mfi]    has battery info: %s\n", controller.battery != nil ? "yes" : "no");
-        RARCH_DBG("[mfi]    has haptics: %s\n", controller.haptics != nil ? "yes" : "no");
-        RARCH_DBG("[mfi]    has light: %s\n", controller.light != nil ? "yes" : "no");
-        RARCH_DBG("[mfi]    has motion: %s\n", controller.motion != nil ? "yes" : "no");
-        RARCH_DBG("[mfi]    has microGamepad: %s\n", controller.microGamepad != nil ? "yes" : "no");
-        RARCH_DBG("[mfi]    has extendedGamepad: %s\n", controller.extendedGamepad != nil ? "yes" : "no");
-        RARCH_DBG("[mfi]    input profile:\n");
+        RARCH_DBG("[MFI] New controller connected:\n");
+        RARCH_DBG("[MFI]    name: %s\n", [controller.vendorName UTF8String]);
+        RARCH_DBG("[MFI]    category: %s\n", [controller.productCategory UTF8String]);
+        RARCH_DBG("[MFI]    has battery info: %s\n", controller.battery != nil ? "yes" : "no");
+        RARCH_DBG("[MFI]    has haptics: %s\n", controller.haptics != nil ? "yes" : "no");
+        RARCH_DBG("[MFI]    has light: %s\n", controller.light != nil ? "yes" : "no");
+        RARCH_DBG("[MFI]    has motion: %s\n", controller.motion != nil ? "yes" : "no");
+        RARCH_DBG("[MFI]    has microGamepad: %s\n", controller.microGamepad != nil ? "yes" : "no");
+        RARCH_DBG("[MFI]    has extendedGamepad: %s\n", controller.extendedGamepad != nil ? "yes" : "no");
+        RARCH_DBG("[MFI]    input profile:\n");
         for (NSString *elem in controller.physicalInputProfile.elements.allKeys)
         {
-            RARCH_DBG("[mfi]       %s\n", [elem UTF8String]);
+            RARCH_DBG("[MFI]       %s\n", [elem UTF8String]);
             GCControllerElement *element = controller.physicalInputProfile.elements[elem];
-            RARCH_DBG("[mfi]          analog: %s\n", element.analog ? "yes" : "no");
-            RARCH_DBG("[mfi]          localizedName: %s\n", [element.localizedName UTF8String]);
+            RARCH_DBG("[MFI]          analog: %s\n", element.analog ? "yes" : "no");
+            RARCH_DBG("[MFI]          localizedName: %s\n", [element.localizedName UTF8String]);
         }
     }
 
@@ -475,7 +466,7 @@ static void apple_gamecontroller_joypad_connect(GCController *controller)
         /* Desired slot is unused, take it */
         if (!mfi_controllers[desired_index])
         {
-            RARCH_LOG("[mfi] controller given desired index %d\n", desired_index);
+            RARCH_LOG("[MFI] Controller given desired index %d.\n", desired_index);
             controller.playerIndex = desired_index;
             mfi_controllers[desired_index] = (uint32_t)controller.hash;
         }
@@ -489,7 +480,7 @@ static void apple_gamecontroller_joypad_connect(GCController *controller)
                 if (mfi_controllers[i])
                     continue;
 
-                RARCH_LOG("[mfi] controller reassigned from desired %d to %d\n", desired_index, i);
+                RARCH_LOG("[MFI] Controller reassigned from desired %d to %d.\n", desired_index, i);
                 mfi_controllers[i]     = (uint32_t)controller.hash;
                 controller.playerIndex = i;
                 break;
@@ -498,7 +489,7 @@ static void apple_gamecontroller_joypad_connect(GCController *controller)
             if (i == MAX_MFI_CONTROLLERS)
             {
                 /* shouldn't ever get here, this is an Apple limit */
-                RARCH_ERR("[mfi] too many connected controllers, ignoring\n");
+                RARCH_ERR("[MFI] Too many connected controllers, ignoring.\n");
                 return;
             }
         }
@@ -506,7 +497,7 @@ static void apple_gamecontroller_joypad_connect(GCController *controller)
 
     [mfiControllers addObject:controller];
 
-    RARCH_LOG("[mfi] controller connected, beginning setup and autodetect\n");
+    RARCH_LOG("[MFI] Controller connected, beginning setup and autodetect...\n");
     apple_gamecontroller_joypad_register(controller);
     apple_gamecontroller_joypad_setup_haptics(controller);
     mfi_joypad_autodetect_add((unsigned)controller.playerIndex, [controller.vendorName cStringUsingEncoding:NSUTF8StringEncoding]);
@@ -514,17 +505,19 @@ static void apple_gamecontroller_joypad_connect(GCController *controller)
 
 static void apple_gamecontroller_joypad_disconnect(GCController* controller)
 {
-    signed pad = (int32_t)controller.playerIndex;
+    NSInteger pad = controller.playerIndex;
 
-    if (pad == GCCONTROLLER_PLAYER_INDEX_UNSET)
+    if (pad < 0 || pad >= MAX_MFI_CONTROLLERS)
         return;
 
+    if (mfi_rumblers[pad])
+        [mfi_rumblers[pad] shutdown];
     mfi_rumblers[pad]    = nil;
     mfi_controllers[pad] = 0;
     if ([mfiControllers containsObject:controller])
     {
         [mfiControllers removeObject:controller];
-        input_autoconfigure_disconnect(pad, mfi_joypad.ident);
+        input_autoconfigure_disconnect((unsigned)pad, mfi_joypad.ident);
     }
 }
 

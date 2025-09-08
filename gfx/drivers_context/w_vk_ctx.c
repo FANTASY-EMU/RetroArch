@@ -29,6 +29,7 @@
 #include <string.h>
 #include <math.h>
 
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commdlg.h>
 
@@ -96,7 +97,7 @@ static void gfx_ctx_w_vk_check_window(void *data, bool *quit,
    if (     (win32_vk.flags & VK_DATA_FLAG_FULLSCREEN)
          && (g_win32_refresh_rate)
          && (g_win32_refresh_rate  != refresh_rate) 
-         && (abs(g_win32_refresh_rate - refresh_rate) > 0)
+         && (fabsf(g_win32_refresh_rate - refresh_rate) > 0.1f)
          && (g_win32_resize_width  == *width) 
          && (g_win32_resize_height == *height))
    {
@@ -132,7 +133,7 @@ static bool gfx_ctx_w_vk_set_resize(void *data,
       return true;
    }
 
-   RARCH_ERR("[Vulkan]: Failed to update swapchain.\n");
+   RARCH_ERR("[Vulkan] Failed to update swapchain.\n");
    return false;
 }
 
@@ -224,7 +225,7 @@ static bool gfx_ctx_w_vk_set_video_mode(void *data,
       return true;
    }
 
-   RARCH_ERR("[Vulkan]: win32_set_video_mode failed.\n");
+   RARCH_ERR("[Vulkan] win32_set_video_mode failed.\n");
    gfx_ctx_w_vk_destroy(data);
    return false;
 }

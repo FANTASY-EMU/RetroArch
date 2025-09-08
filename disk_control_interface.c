@@ -362,15 +362,16 @@ bool disk_control_set_eject_state(
    if (_len > 0)
    {
       if (error)
-         RARCH_ERR("[Disc]: %s\n", msg);
+         RARCH_ERR("[Disc] %s\n", msg);
       else
-         RARCH_LOG("[Disc]: %s\n", msg);
+         RARCH_LOG("[Disc] %s\n", msg);
 
       /* Errors should always be displayed */
       if (verbosity || error)
          runloop_msg_queue_push(
                msg, _len, 1, error ? 180 : 60, true, NULL,
-               MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+               MESSAGE_QUEUE_ICON_DEFAULT,
+               error ? MESSAGE_QUEUE_CATEGORY_ERROR : MESSAGE_QUEUE_CATEGORY_INFO);
    }
 
 #ifdef HAVE_CHEEVOS
@@ -436,14 +437,15 @@ bool disk_control_set_index(
    if (_len > 0)
    {
       if (error)
-         RARCH_ERR("[Disc]: %s\n", msg);
+         RARCH_ERR("[Disc] %s\n", msg);
       else
-         RARCH_LOG("[Disc]: %s\n", msg);
+         RARCH_LOG("[Disc] %s\n", msg);
 
       /* Errors should always be displayed */
       if (verbosity || error)
          runloop_msg_queue_push(msg, _len, 1, msg_duration, true, NULL,
-               MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+               MESSAGE_QUEUE_ICON_DEFAULT,
+               error ? MESSAGE_QUEUE_CATEGORY_ERROR : MESSAGE_QUEUE_CATEGORY_INFO);
    }
 
    /* If operation was successful, update disk
@@ -502,7 +504,7 @@ bool disk_control_set_index_next(
 
    if (!disk_next_enable)
    {
-      RARCH_ERR("[Disc]: %s\n", msg_hash_to_str(MSG_GOT_INVALID_DISK_INDEX));
+      RARCH_ERR("[Disc] %s\n", msg_hash_to_str(MSG_GOT_INVALID_DISK_INDEX));
       return false;
    }
 
@@ -541,7 +543,7 @@ bool disk_control_set_index_prev(
 
    if (!disk_prev_enable)
    {
-      RARCH_ERR("[Disc]: %s\n", msg_hash_to_str(MSG_GOT_INVALID_DISK_INDEX));
+      RARCH_ERR("[Disc] %s\n", msg_hash_to_str(MSG_GOT_INVALID_DISK_INDEX));
       return false;
    }
 
@@ -623,13 +625,13 @@ bool disk_control_append_image(
       goto error;
 
    /* Display log */
-   _len        = strlcpy(msg, msg_hash_to_str(MSG_APPENDED_DISK), sizeof(msg));
+   _len        = strlcpy(msg, msg_hash_to_str(MSG_APPENDED_DISK), sizeof(msg) - 3);
    msg[  _len] = ':';
    msg[++_len] = ' ';
    msg[++_len] = '\0';
    _len += strlcpy(msg + _len, image_filename, sizeof(msg) - _len);
 
-   RARCH_LOG("[Disc]: %s\n", msg);
+   RARCH_LOG("[Disc] %s\n", msg);
    /* This message should always be displayed, since
     * the menu itself does not provide sufficient
     * visual feedback */
@@ -653,7 +655,7 @@ error:
       disk_control_set_eject_state(disk_control, false, false);
 
    _len        = strlcpy(msg,
-         msg_hash_to_str(MSG_FAILED_TO_APPEND_DISK), sizeof(msg));
+         msg_hash_to_str(MSG_FAILED_TO_APPEND_DISK), sizeof(msg) - 3);
    msg[  _len] = ':';
    msg[++_len] = ' ';
    msg[++_len] = '\0';
@@ -719,7 +721,7 @@ bool disk_control_set_initial_index(
           * here may not matter (have to wait until
           * disk index is verified) */
          RARCH_ERR(
-               "[Disc]: Failed to set initial disk index: [%u] %s\n",
+               "[Disc] Failed to set initial disk index: #%u \"%s\".\n",
                disk_control->index_record.image_index,
                disk_control->index_record.image_path);
          return false;
@@ -802,8 +804,8 @@ bool disk_control_verify_initial_index(
             msg_hash_to_str(MSG_FAILED_TO_SET_INITIAL_DISK), sizeof(_msg));
 
       RARCH_ERR(
-               "[Disc]: Failed to set initial disc index:\n> Expected"
-               " [%u] %s\n> Detected [%u] %s\n",
+               "[Disc] Failed to set initial disc index. Expected"
+               " #%u \"%s\", Detected #%u \"%s\".\n",
                disk_control->index_record.image_index + 1,
                disk_control->index_record.image_path,
                image_index + 1,
@@ -812,7 +814,7 @@ bool disk_control_verify_initial_index(
       /* Ignore 'verbosity' setting - errors should
        * always be displayed */
       runloop_msg_queue_push(_msg, _len, 0, 60, true, NULL,
-            MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+            MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_ERROR);
 
       /* Since a failure here typically means that the
        * original M3U content file has been altered,
@@ -846,7 +848,7 @@ bool disk_control_verify_initial_index(
             disk_control, disk_control->initial_num_images, image_index, true,
             &msg_duration, msg, sizeof(msg));
 
-      RARCH_LOG("[Disc]: %s\n", msg);
+      RARCH_LOG("[Disc] %s\n", msg);
 
       /* Note: Do not flush message queue here, since
        * it is likely other notifications will be
@@ -854,7 +856,7 @@ bool disk_control_verify_initial_index(
        * we do not want to 'overwrite' them */
       if (verbosity)
          runloop_msg_queue_push(
-               msg, _len, 0, msg_duration, false, NULL,
+               msg, _len, 2, msg_duration, false, NULL,
                MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
 
 #ifdef HAVE_CHEEVOS

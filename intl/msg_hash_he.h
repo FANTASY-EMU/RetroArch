@@ -807,7 +807,7 @@ MSG_HASH(
    )
 MSG_HASH(
    MENU_ENUM_LABEL_VALUE_BASIC_MENU_CONTROLS_TOGGLE_MENU,
-   "הצגת\\\\הסתרת תפריט"
+   "הצגת\\הסתרת תפריט"
    )
 MSG_HASH(
    MENU_ENUM_LABEL_VALUE_BASIC_MENU_CONTROLS_QUIT,
@@ -1405,16 +1405,15 @@ MSG_HASH(
    )
 
 
-MSG_HASH(
-   MENU_ENUM_LABEL_VALUE_INPUT_META_SEND_DEBUG_INFO,
-   "שלח נתוני ניפוי תקלות"
-   )
-
 /* Settings > Input > Port # Controls */
 
 MSG_HASH(
    MENU_ENUM_LABEL_VALUE_INPUT_DEVICE_TYPE,
    "סוג התקן"
+   )
+MSG_HASH(
+   MENU_ENUM_LABEL_VALUE_INPUT_TURBO,
+   "ירי טורבו"
    )
 
 /* Settings > Latency */
@@ -1821,10 +1820,6 @@ MSG_HASH(
    "עזרה"
    )
 MSG_HASH(
-   MENU_ENUM_LABEL_VALUE_HELP_SEND_DEBUG_INFO,
-   "שלח נתוני ניפוי תקלות"
-   )
-MSG_HASH(
    MENU_ENUM_LABEL_VALUE_CHEEVOS_DESCRIPTION,
    "תיאור"
    )
@@ -1853,7 +1848,7 @@ MSG_HASH(
    )
 MSG_HASH(
    MENU_ENUM_LABEL_VALUE_BASIC_MENU_ENUM_CONTROLS_TOGGLE_MENU,
-   "הצגת\\\\הסתרת תפריט"
+   "הצגת\\הסתרת תפריט"
    )
 
 /* Discord Status */

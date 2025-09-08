@@ -1004,6 +1004,7 @@ static uint32_t d3d11_get_flags(void *data)
 #if defined(HAVE_SLANG) && defined(HAVE_SPIRV_CROSS)
    BIT32_SET(flags, GFX_CTX_FLAGS_SHADERS_SLANG);
    BIT32_SET(flags, GFX_CTX_FLAGS_SUBFRAME_SHADERS);
+   BIT32_SET(flags, GFX_CTX_FLAGS_FAST_TOGGLE_SHADERS);
 #endif
 
    return flags;
@@ -1491,7 +1492,7 @@ static bool d3d11_gfx_set_shader(void* data, enum rarch_shader_type type, const 
 
    if (type != RARCH_SHADER_SLANG)
    {
-      RARCH_WARN("[D3D11]: Only Slang shaders are supported. Falling back to stock.\n");
+      RARCH_WARN("[D3D11] Only Slang shaders are supported. Falling back to stock.\n");
       return false;
    }
 
@@ -1881,34 +1882,34 @@ static bool d3d11_init_swapchain(d3d11_video_t* d3d11,
       switch (d3d11->supportedFeatureLevel)
       {
          case D3D_FEATURE_LEVEL_9_1:
-            RARCH_LOG("[D3D11]: Device created (Feature Level: 9.1)\n");
+            RARCH_LOG("[D3D11] Device created (Feature Level: 9.1)\n");
             break;
          case D3D_FEATURE_LEVEL_9_2:
-            RARCH_LOG("[D3D11]: Device created (Feature Level: 9.2)\n");
+            RARCH_LOG("[D3D11] Device created (Feature Level: 9.2)\n");
             break;
          case D3D_FEATURE_LEVEL_9_3:
-            RARCH_LOG("[D3D11]: Device created (Feature Level: 9.3)\n");
+            RARCH_LOG("[D3D11] Device created (Feature Level: 9.3)\n");
             break;
          case D3D_FEATURE_LEVEL_10_0:
-            RARCH_LOG("[D3D11]: Device created (Feature Level: 10.0)\n");
+            RARCH_LOG("[D3D11] Device created (Feature Level: 10.0)\n");
             break;
          case D3D_FEATURE_LEVEL_10_1:
-            RARCH_LOG("[D3D11]: Device created (Feature Level: 10.1)\n");
+            RARCH_LOG("[D3D11] Device created (Feature Level: 10.1)\n");
             break;
          case D3D_FEATURE_LEVEL_11_0:
-            RARCH_LOG("[D3D11]: Device created (Feature Level: 11.0)\n");
+            RARCH_LOG("[D3D11] Device created (Feature Level: 11.0)\n");
             break;
          case D3D_FEATURE_LEVEL_11_1:
-            RARCH_LOG("[D3D11]: Device created (Feature Level: 11.1)\n");
+            RARCH_LOG("[D3D11] Device created (Feature Level: 11.1)\n");
             break;
          case D3D_FEATURE_LEVEL_12_0:
-            RARCH_LOG("[D3D11]: Device created (Feature Level: 12.0)\n");
+            RARCH_LOG("[D3D11] Device created (Feature Level: 12.0)\n");
             break;
          case D3D_FEATURE_LEVEL_12_1:
-            RARCH_LOG("[D3D11]: Device created (Feature Level: 12.1)\n");
+            RARCH_LOG("[D3D11] Device created (Feature Level: 12.1)\n");
             break;
          default:
-            RARCH_LOG("[D3D11]: Device created (Feature Level: N/A)\n");
+            RARCH_LOG("[D3D11] Device created (Feature Level: N/A)\n");
             break;
       }
    }
@@ -1968,7 +1969,7 @@ static bool d3d11_init_swapchain(d3d11_video_t* d3d11,
          d3d11->flags              |= D3D11_ST_FLAG_HAS_FLIP_MODEL
                                     | D3D11_ST_FLAG_HAS_ALLOW_TEARING;
 
-         RARCH_LOG("[D3D11]: Flip model and tear control supported and enabled.\n");
+         RARCH_LOG("[D3D11] Flip model and tear control supported and enabled.\n");
       }
 
       dxgiFactory5->lpVtbl->Release(dxgiFactory5);
@@ -1978,7 +1979,7 @@ static bool d3d11_init_swapchain(d3d11_video_t* d3d11,
                dxgiFactory, (IUnknown*)d3d11->device,
                &desc, (IDXGISwapChain**)&d3d11->swapChain)))
    {
-      RARCH_WARN("[D3D11]: Failed to create swapchain with flip model, try non-flip model.\n");
+      RARCH_WARN("[D3D11] Failed to create swapchain with flip model, try non-flip model.\n");
 
       /* Failed to create swapchain, try non-flip model */
       desc.SwapEffect           =  DXGI_SWAP_EFFECT_DISCARD;
@@ -2000,33 +2001,38 @@ static bool d3d11_init_swapchain(d3d11_video_t* d3d11,
     * RetroArch only uses windowed mode (see above). */
    if (FAILED(dxgiFactory->lpVtbl->MakeWindowAssociation(dxgiFactory, desc.OutputWindow, DXGI_MWA_NO_ALT_ENTER)))
    {
-      RARCH_ERR("[D3D11]: Failed to make disable DXGI ALT+ENTER handling.\n");
+      RARCH_ERR("[D3D11] Failed to make disable DXGI ALT+ENTER handling.\n");
    }
 #endif
 
 #endif    /* __WINRT__ */
 
-   if    (   (d3d11->flags & D3D11_ST_FLAG_WAITABLE_SWAPCHAINS)
-          && (d3d11->frameLatencyWaitableObject = DXGIGetFrameLatencyWaitableObject(d3d11->swapChain)))
+   if (     (d3d11->flags & D3D11_ST_FLAG_WAITABLE_SWAPCHAINS)
+         && (d3d11->frameLatencyWaitableObject = DXGIGetFrameLatencyWaitableObject(d3d11->swapChain)))
    {
-      settings_t* settings      =  config_get_ptr();
-      UINT max_latency          =  settings->uints.video_max_frame_latency;
-      UINT cur_latency          =  0;
+      settings_t* settings      = config_get_ptr();
+      int8_t opt_latency        = settings->ints.video_max_frame_latency;
+      UINT max_latency          = 0;
+      UINT cur_latency          = 0;
 
-      if (max_latency == 0)
+      if (opt_latency < 1)
       {
-         max_latency            =  1;
-         d3d11->flags          |=  D3D11_ST_FLAG_WAIT_FOR_VBLANK;
+         max_latency            = 1;
+         d3d11->wait_for_vblank = (!opt_latency) ? 1 : -1;
       }
       else
-         d3d11->flags          &= ~D3D11_ST_FLAG_WAIT_FOR_VBLANK;
+      {
+         max_latency            = opt_latency;
+         d3d11->wait_for_vblank = 0;
+      }
 
       DXGISetMaximumFrameLatency(d3d11->swapChain, max_latency);
       DXGIGetMaximumFrameLatency(d3d11->swapChain, &cur_latency);
-      RARCH_LOG("[D3D11]: Requesting %u maximum frame latency, using %u%s.\n",
-            settings->uints.video_max_frame_latency,
+      RARCH_LOG("[D3D11] Requesting %u maximum frame latency, using %u%s.\n",
+            max_latency,
             cur_latency,
-            (d3d11->flags & D3D11_ST_FLAG_WAIT_FOR_VBLANK) ? " with WaitForVBlank" : "");
+            ((d3d11->wait_for_vblank < 0) ? " with WaitForVBlank before Present" :
+             (d3d11->wait_for_vblank > 0) ? " with WaitForVBlank after Present"  : ""));
    }
 
 #ifdef HAVE_DXGI_HDR
@@ -2116,7 +2122,7 @@ static void *d3d11_gfx_init(const video_info_t* video,
 
    if (!win32_set_video_mode(d3d11, d3d11->vp.full_width, d3d11->vp.full_height, video->fullscreen))
    {
-      RARCH_ERR("[D3D11]: win32_set_video_mode failed.\n");
+      RARCH_ERR("[D3D11] win32_set_video_mode failed.\n");
       goto error;
    }
 
@@ -2613,7 +2619,7 @@ static void *d3d11_gfx_init(const video_info_t* video,
          utf16_to_char_string((const uint16_t*)
                desc.Description, str, sizeof(str));
 
-         RARCH_LOG("[D3D11]: Found GPU at index %d: \"%s\".\n", i, str);
+         RARCH_LOG("[D3D11] Found GPU at index %d: \"%s\".\n", i, str);
 
          string_list_append(d3d11->gpu_list, str, attr);
 
@@ -2629,11 +2635,11 @@ static void *d3d11_gfx_init(const video_info_t* video,
       {
          d3d11->current_adapter = d3d11->adapters[gpu_index];
          d3d11->adapter         = d3d11->current_adapter;
-         RARCH_LOG("[D3D11]: Using GPU index %d.\n", gpu_index);
+         RARCH_LOG("[D3D11] Using GPU index %d.\n", gpu_index);
       }
       else
       {
-         RARCH_WARN("[D3D11]: Invalid GPU index %d, using first device found.\n", gpu_index);
+         RARCH_WARN("[D3D11] Invalid GPU index %d, using first device found.\n", gpu_index);
          d3d11->current_adapter = d3d11->adapters[0];
          d3d11->adapter         = d3d11->current_adapter;
       }
@@ -2735,7 +2741,7 @@ static void d3d11_init_render_targets(d3d11_video_t* d3d11, unsigned width, unsi
          height = d3d11->vp.height;
       }
 
-      RARCH_LOG("[D3D11]: Updating framebuffer size %ux%u.\n", width, height);
+      RARCH_DBG("[D3D11] Updating framebuffer size %ux%u.\n", width, height);
 
       if (     (i != (d3d11->shader_preset->passes - 1))
             || (width  != d3d11->vp.width)
@@ -2774,6 +2780,14 @@ static void d3d11_init_render_targets(d3d11_video_t* d3d11, unsigned width, unsi
    d3d11->flags &= ~D3D11_ST_FLAG_RESIZE_RTS;
 }
 
+static INLINE void d3d11_wait_for_vblank(d3d11_video_t* d3d11)
+{
+   IDXGIOutput *pOutput;
+   DXGIGetContainingOutput(d3d11->swapChain, &pOutput);
+   DXGIWaitForVBlank(pOutput);
+   Release(pOutput);
+}
+
 static bool d3d11_gfx_frame(
       void*               data,
       const void*         frame,
@@ -2790,9 +2804,8 @@ static bool d3d11_gfx_frame(
    d3d11_video_t* d3d11           = (d3d11_video_t*)data;
    D3D11DeviceContext context     = d3d11->context;
    bool vsync                     = (d3d11->flags & D3D11_ST_FLAG_VSYNC) ? true : false;
-   bool wait_for_vblank           = (d3d11->flags & D3D11_ST_FLAG_WAIT_FOR_VBLANK) ? true : false;
-   unsigned present_flags         = (vsync || !(d3d11->flags & D3D11_ST_FLAG_HAS_ALLOW_TEARING))
-         ? 0 : DXGI_PRESENT_ALLOW_TEARING;
+   unsigned present_flags         = (!vsync && (d3d11->flags & D3D11_ST_FLAG_HAS_ALLOW_TEARING))
+         ? DXGI_PRESENT_ALLOW_TEARING : 0;
    const char *stat_text          = video_info->stat_text;
    unsigned video_width           = video_info->width;
    unsigned video_height          = video_info->height;
@@ -3056,7 +3069,7 @@ static bool d3d11_gfx_frame(
 
    texture = d3d11->frame.texture;
 
-   if (d3d11->shader_preset)
+   if (d3d11->shader_preset && video_info->shader_active)
    {
       for (i = 0; i < d3d11->shader_preset->passes; i++)
       {
@@ -3081,10 +3094,9 @@ static bool d3d11_gfx_frame(
          }
 
          if (d3d11->shader_preset->pass[i].frame_count_mod)
-            d3d11->pass[i].frame_count   =
-               frame_count % d3d11->shader_preset->pass[i].frame_count_mod;
+            d3d11->pass[i].frame_count = frame_count % d3d11->shader_preset->pass[i].frame_count_mod;
          else
-            d3d11->pass[i].frame_count   = frame_count;
+            d3d11->pass[i].frame_count = frame_count;
 
 #ifdef HAVE_REWIND
          d3d11->pass[i].frame_direction  = state_manager_frame_is_reversed() ? -1 : 1;
@@ -3096,10 +3108,10 @@ static bool d3d11_gfx_frame(
          d3d11->pass[i].rotation         = retroarch_get_rotation();
          d3d11->pass[i].core_aspect      = video_driver_get_core_aspect();
          /* OriginalAspectRotated: return 1 / aspect for 90 and 270 rotated content */
-         d3d11->pass[i].core_aspect_rot = video_driver_get_core_aspect();
-         uint32_t rot = retroarch_get_rotation();
-         if (rot == 1 || rot == 3)
-            d3d11->pass[i].core_aspect_rot = 1/d3d11->pass[i].core_aspect_rot;
+         d3d11->pass[i].core_aspect_rot  = d3d11->pass[i].core_aspect;
+         if (     d3d11->pass[i].rotation == VIDEO_ROTATION_90_DEG
+               || d3d11->pass[i].rotation == VIDEO_ROTATION_270_DEG)
+            d3d11->pass[i].core_aspect_rot = 1 / d3d11->pass[i].core_aspect_rot;
 
          /* Sub-frame info for multiframe shaders (per real content frame).
             Should always be 1 for non-use of subframes */
@@ -3475,15 +3487,19 @@ static bool d3d11_gfx_frame(
    }
 #endif
 
-   DXGIPresent(d3d11->swapChain, d3d11->swap_interval, present_flags);
-
-   if (vsync && wait_for_vblank)
+   if (vsync && d3d11->wait_for_vblank < 0)
    {
-      IDXGIOutput *pOutput;
-      DXGIGetContainingOutput(d3d11->swapChain, &pOutput);
-      DXGIWaitForVBlank(pOutput);
-      Release(pOutput);
+      d3d11->context->lpVtbl->Flush(d3d11->context);
+      d3d11_wait_for_vblank(d3d11);
+      DXGIPresent(d3d11->swapChain, 0,
+            (present_flags | (d3d11->flags & D3D11_ST_FLAG_HAS_ALLOW_TEARING) ? DXGI_PRESENT_ALLOW_TEARING : 0)
+      );
    }
+   else
+      DXGIPresent(d3d11->swapChain, d3d11->swap_interval, present_flags);
+
+   if (vsync && d3d11->wait_for_vblank > 0)
+      d3d11_wait_for_vblank(d3d11);
 
    if (
            black_frame_insertion
@@ -3653,7 +3669,7 @@ static bool d3d11_gfx_read_viewport(void* data, uint8_t* buffer, bool is_idle)
 #ifdef HAVE_DXGI_HDR
    if ((d3d11->flags & D3D11_ST_FLAG_HDR_ENABLE))
    {
-      RARCH_ERR("[D3D11]: HDR screenshot not supported.\n");
+      RARCH_ERR("[D3D11] HDR screenshot not supported.\n");
       return false;
    }
 #endif
@@ -3722,7 +3738,7 @@ static bool d3d11_gfx_read_viewport(void* data, uint8_t* buffer, bool is_idle)
    }
    else
    {
-      RARCH_ERR("[D3D11]: Unexpected swapchain format.\n");
+      RARCH_ERR("[D3D11] Unexpected swapchain format.\n");
       ret = false;
    }
 

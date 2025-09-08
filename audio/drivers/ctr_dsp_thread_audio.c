@@ -16,11 +16,13 @@
 #include <3ds.h>
 #include <string.h>
 #include <malloc.h>
+#include <math.h>
 #include <queues/fifo_queue.h>
 #include <rthreads/rthreads.h>
 
 #include "../audio_driver.h"
 #include "../../ctr/ctr_debug.h"
+#include "../../verbosity.h"
 
 typedef struct
 {
@@ -148,7 +150,7 @@ static void *ctr_dsp_thread_audio_init(const char *device, unsigned rate, unsign
        || !(ctr->fifo_done = scond_new())
        || !(ctr->thread = sthread_create(ctr_dsp_audio_loop, ctr)))
    {
-      RARCH_LOG("[Audio]: thread creation failed.\n");
+      RARCH_LOG("[Audio] Thread creation failed.\n");
       ctr->running = false;
       ctr_dsp_thread_audio_free(ctr);
       return NULL;

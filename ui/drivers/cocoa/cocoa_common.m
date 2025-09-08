@@ -57,6 +57,10 @@
 #include "../../menu/menu_driver.h"
 #endif
 
+#ifdef HAVE_MIST
+#include "steam/steam.h"
+#endif
+
 #if IOS
 #import <UIKit/UIAccessibility.h>
 extern bool RAIsVoiceOverRunning(void)
@@ -95,6 +99,56 @@ void cocoa_file_load_with_detect_core(const char *filename);
 >
 @end
 #endif
+
+static CFRunLoopObserverRef iterate_observer;
+
+static void rarch_draw_observer(CFRunLoopObserverRef observer,
+    CFRunLoopActivity activity, void *info)
+{
+   uint32_t runloop_flags;
+   int          ret   = runloop_iterate();
+
+   if (ret == -1)
+   {
+#ifdef HAVE_QT
+      application->quit();
+#endif
+      main_exit(NULL);
+      exit(0);
+      return;
+   }
+
+   task_queue_check();
+
+#ifdef HAVE_MIST
+   steam_poll();
+#endif
+
+   runloop_flags = runloop_get_flags();
+   if (!(runloop_flags & RUNLOOP_FLAG_IDLE))
+      CFRunLoopWakeUp(CFRunLoopGetMain());
+}
+
+void rarch_start_draw_observer(void)
+{
+   if (iterate_observer && CFRunLoopObserverIsValid(iterate_observer))
+       return;
+
+   if (iterate_observer != NULL)
+      CFRelease(iterate_observer);
+   iterate_observer = CFRunLoopObserverCreate(0, kCFRunLoopBeforeWaiting,
+                                              true, 0, rarch_draw_observer, 0);
+   CFRunLoopAddObserver(CFRunLoopGetMain(), iterate_observer, kCFRunLoopCommonModes);
+}
+
+void rarch_stop_draw_observer(void)
+{
+    if (!iterate_observer || !CFRunLoopObserverIsValid(iterate_observer))
+        return;
+    CFRunLoopObserverInvalidate(iterate_observer);
+    CFRelease(iterate_observer);
+    iterate_observer = NULL;
+}
 
 @implementation CocoaView
 
@@ -521,36 +575,48 @@ void cocoa_file_load_with_detect_core(const char *filename);
 -(void)adjustViewFrameForSafeArea
 {
    /* This is for adjusting the view frame to account for
-    * the notch in iPhone X phones */
+    * the notch in iPhone X phones. In multitasking mode,
+    * we should only adjust within the current view bounds,
+    * not force full screen dimensions. */
    if (@available(iOS 11, *))
    {
-      settings_t *settings               = config_get_ptr();
-      RAScreen *screen                   = (BRIDGE RAScreen*)cocoa_screen_get_chosen();
-      CGRect screenSize                  = [screen bounds];
-      
-      // 使用更安全的方式获取 safeAreaInsets，避免访问可能为 nil 的 AppDelegate.window
-      UIEdgeInsets inset                 = self.view.safeAreaInsets;
-      
-      // 使用更安全的方式获取屏幕方向
-      UIInterfaceOrientation orientation = UIInterfaceOrientationPortrait;
-      if (@available(iOS 13.0, *)) {
-          // iOS 13+ 使用 windowScene 获取方向
-          if (self.view.window && self.view.window.windowScene) {
-              orientation = self.view.window.windowScene.interfaceOrientation;
-          }
-      } else {
-          // iOS 13以下使用传统方法
-          orientation = [[UIApplication sharedApplication] statusBarOrientation];
+      /* Early return if core systems aren't initialized yet */
+      settings_t *settings = config_get_ptr();
+      if (!settings)
+         return;
+
+      /* Check if we're in multitasking mode (Split View or Slide Over)
+       * by comparing our view size to the full screen size */
+      RAScreen *screen     = (BRIDGE RAScreen*)cocoa_screen_get_chosen();
+      if (!screen)
+         return;
+
+      CGRect screenSize    = [screen bounds];
+
+      if (ios_running_on_ipad())
+      {
+         CGRect currentBounds = self.view.bounds;
+         bool isMultitasking  = (currentBounds.size.width < screenSize.size.width ||
+                                 currentBounds.size.height < screenSize.size.height);
+
+         /* In multitasking mode, don't override the frame - let iOS handle it */
+         if (isMultitasking)
+            return;
       }
 
       if (settings->bools.video_notch_write_over_enable)
       {
-         self.view.frame = CGRectMake(screenSize.origin.x,
-                     screenSize.origin.y,
-                     screenSize.size.width,
-                     screenSize.size.height);
+         self.view.frame = screenSize;
          return;
       }
+
+      /* Only apply safe area adjustments when in full screen mode */
+      UIWindow *window     = [[UIApplication sharedApplication] delegate].window;
+      if (!window)
+         return;
+
+      UIEdgeInsets inset   = window.safeAreaInsets;
+      UIInterfaceOrientation orientation = [[UIApplication sharedApplication] statusBarOrientation];
 
       switch (orientation)
       {
@@ -597,9 +663,9 @@ void cocoa_file_load_with_detect_core(const char *filename);
   {
     if (self.shouldLockCurrentInterfaceOrientation)
       return 1 << self.lockInterfaceOrientation;
-    return (UIInterfaceOrientationMask)apple_frontend_settings.orientation_flags;
+    return UIInterfaceOrientationMaskAll;
   }
-  return (UIInterfaceOrientationMask)apple_frontend_settings.orientation_flags;
+  return UIInterfaceOrientationMaskAll;
 }
 
 /* NOTE: This does not run on iOS 16+ */
@@ -613,29 +679,7 @@ void cocoa_file_load_with_detect_core(const char *filename);
 /* NOTE: This version runs on iOS2-iOS5, but not iOS6+. */
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation
 {
-   unsigned orientation_flags = apple_frontend_settings.orientation_flags;
-
-   switch (interfaceOrientation)
-   {
-      case UIInterfaceOrientationPortrait:
-         return (orientation_flags
-               & UIInterfaceOrientationMaskPortrait);
-      case UIInterfaceOrientationPortraitUpsideDown:
-         return (orientation_flags
-               & UIInterfaceOrientationMaskPortraitUpsideDown);
-      case UIInterfaceOrientationLandscapeLeft:
-         return (orientation_flags
-               & UIInterfaceOrientationMaskLandscapeLeft);
-      case UIInterfaceOrientationLandscapeRight:
-         return (orientation_flags
-               & UIInterfaceOrientationMaskLandscapeRight);
-
-      default:
-         break;
-   }
-
-   return (orientation_flags
-            & UIInterfaceOrientationMaskAll);
+   return YES;
 }
 #endif
 
@@ -725,8 +769,10 @@ void cocoa_file_load_with_detect_core(const char *filename);
 -(void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
+#if !TARGET_OS_SIMULATOR
     [[WebServer sharedInstance] startServers];
     [WebServer sharedInstance].webUploader.delegate = self;
+#endif
 }
 
 #if TARGET_OS_IOS && HAVE_IOS_TOUCHMOUSE

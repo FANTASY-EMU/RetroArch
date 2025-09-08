@@ -226,10 +226,10 @@ static void cocoa_gl_gfx_ctx_get_video_size(void *data,
 static void cocoa_gl_gfx_ctx_get_video_size(void *data,
       unsigned* width, unsigned* height)
 {
-   float screenscale               = cocoa_screen_get_native_scale();
    CGRect size                     = glk_view.bounds;
-   *width                          = CGRectGetWidth(size)  * screenscale;
-   *height                         = CGRectGetHeight(size) * screenscale;
+   float viewScale                 = [glk_view contentScaleFactor];
+   *width                          = CGRectGetWidth(size)  * viewScale;
+   *height                         = CGRectGetHeight(size) * viewScale;
 }
 #endif
 
@@ -242,7 +242,10 @@ static float cocoa_gl_gfx_ctx_get_refresh_rate(void *data)
     CFRelease(currentMode);
     return currentRate;
 #else
-    return [UIScreen mainScreen].maximumFramesPerSecond;
+    if (@available(iOS 10.3, tvOS 10.2, *))
+       return [UIScreen mainScreen].maximumFramesPerSecond;
+    else
+       return 60;
 #endif
 }
 
@@ -580,7 +583,7 @@ const gfx_ctx_driver_t gfx_ctx_cocoagl = {
    cocoa_has_focus,
    cocoa_gl_gfx_ctx_suppress_screensaver,
 #if defined(HAVE_COCOATOUCH)
-   false,
+   true,
 #else
    true,
 #endif

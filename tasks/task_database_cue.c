@@ -60,6 +60,7 @@ static struct magic_entry MAGIC_NUMBERS[] = {
    { "Sony - PlayStation",          "Sony Computer ",   0x0024f8}, /* PS1 CD license string, PS2 CD doesnt have this string */
    { "Sony - PlayStation 2",        "PLAYSTATION",      0x009320}, /* PS1 CD and PS2 CD */
    { "Sony - PlayStation 2",        "PLAYSTATION",      0x008008}, /* PS2 DVD */
+   { "Sony - PlayStation 2",        "           ",      0x008008}, /* PS2 DVD */
    { "Sony - PlayStation Portable", "PSP GAME",         0x008008},
    { NULL,                          NULL,               0}
 };
@@ -187,14 +188,18 @@ int detect_ps1_game(intfstream_t *fd, char *s, size_t len, const char *filename)
 {
    int pos;
    char raw_game_id[50];
-   char disc_data[DISC_DATA_SIZE_PS1];
+   char *disc_data = malloc(DISC_DATA_SIZE_PS1);
+
+   if (!disc_data)
+      return false;
 
    /* Load data into buffer and use pointers */
-   if (intfstream_seek(fd, 0, SEEK_SET) < 0)
+   if (intfstream_seek(fd, 0, SEEK_SET) < 0
+      || intfstream_read(fd, disc_data, DISC_DATA_SIZE_PS1) <= 0)
+   {
+      free(disc_data);
       return false;
-
-   if (intfstream_read(fd, disc_data, DISC_DATA_SIZE_PS1) <= 0)
-      return false;
+   }
 
    disc_data[DISC_DATA_SIZE_PS1 - 1] = '\0';
 
@@ -238,6 +243,7 @@ int detect_ps1_game(intfstream_t *fd, char *s, size_t len, const char *filename)
 
             string_remove_all_whitespace(s, raw_game_id);
             cue_append_multi_disc_suffix(s, filename);
+            free(disc_data);
             return true;
          }
       }
@@ -247,6 +253,7 @@ int detect_ps1_game(intfstream_t *fd, char *s, size_t len, const char *filename)
 
          string_remove_all_whitespace(s, raw_game_id);
          cue_append_multi_disc_suffix(s, filename);
+         free(disc_data);
          return true;
       }
       else if (string_is_equal_fast(raw_game_id, "PSX.EXE", STRLEN_CONST("PSX.EXE")))
@@ -255,6 +262,7 @@ int detect_ps1_game(intfstream_t *fd, char *s, size_t len, const char *filename)
 
          string_remove_all_whitespace(s, raw_game_id);
          cue_append_multi_disc_suffix(s, filename);
+         free(disc_data);
          return false;
       }
    }
@@ -271,12 +279,13 @@ int detect_ps1_game(intfstream_t *fd, char *s, size_t len, const char *filename)
    s[9 ] = 'X';
    s[10] = '\0';
    cue_append_multi_disc_suffix(s, filename);
+   free(disc_data);
    return false;
 }
 
 int detect_ps2_game(intfstream_t *fd, char *s, size_t len, const char *filename)
 {
-   #define DISC_DATA_SIZE_PS2 0x84000
+   #define DISC_DATA_SIZE_PS2 600000
    int pos;
    char raw_game_id[50];
    char *disc_data;
@@ -374,6 +383,11 @@ int detect_ps2_game(intfstream_t *fd, char *s, size_t len, const char *filename)
                raw_game_id[8] = raw_game_id[9];
                raw_game_id[9] = raw_game_id[10];
             }
+            /* Wild character conversions */
+            if (raw_game_id[8] == 18)
+               raw_game_id[8] = 51; 
+            if (raw_game_id[9] == 18)
+               raw_game_id[9] = 51; 
             raw_game_id[10] = '\0';
 
             string_remove_all_whitespace(s, raw_game_id);
@@ -402,16 +416,20 @@ int detect_ps2_game(intfstream_t *fd, char *s, size_t len, const char *filename)
 
 int detect_psp_game(intfstream_t *fd, char *s, size_t len, const char *filename)
 {
-   #define DISC_DATA_SIZE_PSP 40000
+   #define DISC_DATA_SIZE_PSP 300000
    int pos;
-   char disc_data[DISC_DATA_SIZE_PSP];
+   char *disc_data = malloc(DISC_DATA_SIZE_PSP);
+
+   if (!disc_data)
+      return false;
 
    /* Load data into buffer and use pointers */
-   if (intfstream_seek(fd, 0, SEEK_SET) < 0)
+   if (intfstream_seek(fd, 0, SEEK_SET) < 0
+      || intfstream_read(fd, disc_data, DISC_DATA_SIZE_PSP) <= 0)
+   {
+      free(disc_data);
       return false;
-
-   if (intfstream_read(fd, disc_data, DISC_DATA_SIZE_PSP) <= 0)
-      return false;
+   }
 
    disc_data[DISC_DATA_SIZE_PSP - 1] = '\0';
 
@@ -455,11 +473,13 @@ int detect_psp_game(intfstream_t *fd, char *s, size_t len, const char *filename)
             )
          {
             cue_append_multi_disc_suffix(s, filename);
+            free(disc_data);
             return true;
          }
       }
    }
 
+   free(disc_data);
    return false;
 }
 
@@ -492,7 +512,7 @@ size_t detect_gc_game(intfstream_t *fd, char *s, size_t len, const char *filenam
    if (raw_game_id[0] == '\0' || raw_game_id[0] == ' ')
    {
 #ifdef DEBUG
-      RARCH_LOG("[Scanner]: Scrubbing: %s\n", filename);
+      RARCH_LOG("[Scanner] Scrubbing: \"%s\".\n", filename);
 #endif
       return 0;
    }
@@ -585,7 +605,7 @@ int detect_scd_game(intfstream_t *fd, char *s, size_t len, const char *filename)
 #ifdef DEBUG
    /** Scrub files with bad data and log **/
    if (raw_game_id[0] == '\0' || raw_game_id[0] == ' ' || raw_game_id[0] == '0')
-      RARCH_LOG("[Scanner]: Scrubbing: %s\n", filename);
+      RARCH_LOG("[Scanner] Scrubbing: \"%s\".\n", filename);
 #endif
 
    /** convert raw Sega - Mega-CD - Sega CD serial to redump serial. **/
@@ -699,7 +719,7 @@ int detect_sat_game(intfstream_t *fd, char *s, size_t len, const char *filename)
    if (raw_game_id[0] == '\0' || raw_game_id[0] == ' ')
    {
 #ifdef DEBUG
-      RARCH_LOG("[Scanner]: Scrubbing: %s\n", filename);
+      RARCH_LOG("[Scanner] Scrubbing: \"%s\".\n", filename);
 #endif
       return false;
    }
@@ -722,8 +742,7 @@ int detect_sat_game(intfstream_t *fd, char *s, size_t len, const char *filename)
                && raw_game_id[1] == 'K'
                && raw_game_id[2] == '-')
          {
-            strncpy(s, &raw_game_id[3], __len - 3);
-            s[__len - 3] = '\0';
+            strlcpy(s, &raw_game_id[3], len);
          }
          else
             strlcpy(s, raw_game_id, len);
@@ -787,7 +806,7 @@ int detect_dc_game(intfstream_t *fd, char *s, size_t len, const char *filename)
          || raw_game_id[0] == ' ')
    {
 #ifdef DEBUG
-      RARCH_LOG("[Scanner]: Scrubbing: %s\n", filename);
+      RARCH_LOG("[Scanner] Scrubbing: \"%s\".\n", filename);
 #endif
       return false;
    }
@@ -842,7 +861,7 @@ int detect_dc_game(intfstream_t *fd, char *s, size_t len, const char *filename)
       lgame_id[1]          = '\0';
       strncpy(rgame_id, &raw_game_id[1], __len - 1);
       rgame_id[__len - 1]  = '\0';
-      _len                 = strlcpy(pre_game_id, lgame_id, sizeof(pre_game_id));
+      _len                 = strlcpy(pre_game_id, lgame_id, sizeof(pre_game_id) - 2);
       pre_game_id[  _len]  = '-';
       pre_game_id[++_len]  = '\0';
       strlcpy(pre_game_id + _len, rgame_id, sizeof(pre_game_id) - _len);
@@ -979,7 +998,7 @@ size_t detect_wii_game(intfstream_t *fd, char *s, size_t len, const char *filena
          || raw_game_id[0] == ' ')
    {
 #ifdef DEBUG
-      RARCH_LOG("[Scanner]: Scrubbing: %s\n", filename);
+      RARCH_LOG("[Scanner] Scrubbing: \"%s\".\n", filename);
 #endif
       return 0;
    }
@@ -1045,7 +1064,7 @@ int detect_system(intfstream_t *fd, const char **system_name, const char * filen
    int i;
    char magic[50];
 #ifdef DEBUG
-   RARCH_LOG("[Scanner]: %s\n", msg_hash_to_str(MSG_COMPARING_WITH_KNOWN_MAGIC_NUMBERS));
+   RARCH_LOG("[Scanner] %s\n", msg_hash_to_str(MSG_COMPARING_WITH_KNOWN_MAGIC_NUMBERS));
 #endif
    for (i = 0; MAGIC_NUMBERS[i].system_name != NULL; i++)
    {
@@ -1059,8 +1078,8 @@ int detect_system(intfstream_t *fd, const char **system_name, const char * filen
             {
                *system_name = MAGIC_NUMBERS[i].system_name;
 #ifdef DEBUG
-               RARCH_LOG("[Scanner]: Name: %s\n", filename);
-               RARCH_LOG("[Scanner]: System: %s\n", MAGIC_NUMBERS[i].system_name);
+               RARCH_LOG("[Scanner] Name: %s\n", filename);
+               RARCH_LOG("[Scanner] System: %s\n", MAGIC_NUMBERS[i].system_name);
 #endif
                return true;
             }
@@ -1069,8 +1088,8 @@ int detect_system(intfstream_t *fd, const char **system_name, const char * filen
    }
 
 #ifdef DEBUG
-   RARCH_LOG("[Scanner]: Name: %s\n", filename);
-   RARCH_LOG("[Scanner]: System: Unknown\n");
+   RARCH_LOG("[Scanner] Name: %s\n", filename);
+   RARCH_LOG("[Scanner] System: Unknown\n");
 #endif
    return false;
 }
@@ -1138,13 +1157,13 @@ int cue_find_track(const char *cue_path, bool first,
             RETRO_VFS_FILE_ACCESS_READ, RETRO_VFS_FILE_ACCESS_HINT_NONE))
    {
 #ifdef DEBUG
-      RARCH_LOG("Could not open CUE file '%s'\n", cue_path);
+      RARCH_LOG("[Scanner] Could not open CUE file \"%s\".\n", cue_path);
 #endif
       goto error;
    }
 
 #ifdef DEBUG
-   RARCH_LOG("Parsing CUE file '%s'...\n", cue_path);
+   RARCH_LOG("[Scanner] Parsing CUE file \"%s\"...\n", cue_path);
 #endif
 
    tmp_token[0] = '\0';
@@ -1194,7 +1213,7 @@ int cue_find_track(const char *cue_path, bool first,
          if (sscanf(tmp_token, "%02d:%02d:%02d", &_m, &_s, &_f) < 3)
          {
 #ifdef DEBUG
-            RARCH_LOG("Error parsing time stamp '%s'\n", tmp_token);
+            RARCH_LOG("[Scanner] Error parsing time stamp \"%s\".\n", tmp_token);
 #endif
             goto error;
          }
@@ -1288,13 +1307,13 @@ int gdi_find_track(const char *gdi_path, bool first, char *s, size_t len)
             RETRO_VFS_FILE_ACCESS_READ, RETRO_VFS_FILE_ACCESS_HINT_NONE))
    {
 #ifdef DEBUG
-      RARCH_LOG("Could not open GDI file '%s'\n", gdi_path);
+      RARCH_LOG("[Scanner] Could not open GDI file \"%s\".\n", gdi_path);
 #endif
       goto error;
    }
 
 #ifdef DEBUG
-   RARCH_LOG("Parsing GDI file '%s'...\n", gdi_path);
+   RARCH_LOG("[Scanner] Parsing GDI file \"%s\"...\n", gdi_path);
 #endif
 
    tmp_token[0] = '\0';

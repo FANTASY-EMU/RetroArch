@@ -730,7 +730,7 @@ static void wl_registry_handle_global(void *data, struct wl_registry *reg,
    int found = 1;
    gfx_ctx_wayland_data_t *wl = (gfx_ctx_wayland_data_t*)data;
 
-   RARCH_DBG("[Wayland]: Add global %u, interface %s, version %u\n",
+   RARCH_DBG("[Wayland] Add global %u, interface %s, version %u.\n",
          id, interface, version);
 
    if (string_is_equal(interface, wl_compositor_interface.name) && found++)
@@ -806,9 +806,13 @@ static void wl_registry_handle_global(void *data, struct wl_registry *reg,
       wl->single_pixel_manager = (struct wp_single_pixel_buffer_manager_v1*)
          wl_registry_bind(
             reg, id, &wp_single_pixel_buffer_manager_v1_interface, MIN(version, 1));
+   else if (string_is_equal(interface, xdg_toplevel_icon_manager_v1_interface.name) && found++)
+      wl->xdg_toplevel_icon_manager = (struct xdg_toplevel_icon_manager_v1*)
+         wl_registry_bind(
+            reg, id, &xdg_toplevel_icon_manager_v1_interface, MIN(version, 1));
 
    if (found > 1)
-   RARCH_LOG("[Wayland]: Registered interface %s at version %u\n",
+   RARCH_LOG("[Wayland] Registered interface %s at version %u.\n",
          interface, version);
 }
 
@@ -911,9 +915,9 @@ static void *wayland_data_offer_receive(
    *length      = 0;
 
    if (!offer)
-      RARCH_WARN("[Wayland]: Invalid data offer\n");
+      RARCH_WARN("[Wayland] Invalid data offer.\n");
    else if (pipe2(pipefd, O_CLOEXEC|O_NONBLOCK) == -1)
-      RARCH_WARN("[Wayland]: Could not read pipe");
+      RARCH_WARN("[Wayland] Could not read pipe.\n");
    else
    {
       wl_data_offer_receive(offer, mime_type, pipefd[1]);
@@ -1024,15 +1028,15 @@ static void wl_data_device_handle_drop(void *data,
 
    if (!(stream = fmemopen(buffer, __len, "r")))
    {
-      RARCH_WARN("[Wayland]: Failed to open DnD buffer\n");
+      RARCH_WARN("[Wayland] Failed to open DnD buffer.\n");
       return;
    }
 
-   RARCH_WARN("[Wayland]: Files opp:\n");
+   RARCH_WARN("[Wayland] Files opp:\n");
    while ((read = getline(&line,  &_len, stream)) != -1)
    {
       line[strcspn(line, "\r\n")] = 0;
-      RARCH_DBG("[Wayland]: > \"%s\"\n", line);
+      RARCH_DBG("[Wayland] > \"%s\".\n", line);
 
       /* TODO/FIXME: Convert from file:// URI, Implement file loading
        * Drag and Drop */

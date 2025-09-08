@@ -911,7 +911,7 @@ static void gl1_overlay_vertex_geom(void *data,
 
    if (image > gl->overlays)
    {
-      RARCH_ERR("[GL]: Invalid overlay id: %u\n", image);
+      RARCH_ERR("[GL1] Invalid overlay id: %u.\n", image);
       return;
    }
 
@@ -1015,7 +1015,7 @@ static void *gl1_init(const video_info_t *video,
 
    video_context_driver_set((const gfx_ctx_driver_t*)ctx_driver);
 
-   RARCH_LOG("[GL1]: Found GL1 context: \"%s\".\n", ctx_driver->ident);
+   RARCH_LOG("[GL1] Found GL1 context: \"%s\".\n", ctx_driver->ident);
 
    if (gl1->ctx_driver->get_video_size)
       gl1->ctx_driver->get_video_size(gl1->ctx_data,
@@ -1048,7 +1048,7 @@ static void *gl1_init(const video_info_t *video,
    if (string_is_equal(ctx_driver->ident, "null"))
       goto error;
 
-   RARCH_LOG("[GL1]: Detecting screen resolution: %ux%u.\n", full_x, full_y);
+   RARCH_LOG("[GL1] Detecting screen resolution: %ux%u.\n", full_x, full_y);
    win_width       = video->width;
    win_height      = video->height;
 
@@ -1097,7 +1097,7 @@ static void *gl1_init(const video_info_t *video,
 
    video_driver_get_size(&temp_width, &temp_height);
 
-   RARCH_LOG("[GL1]: Using resolution %ux%u.\n", temp_width, temp_height);
+   RARCH_LOG("[GL1] Using resolution %ux%u.\n", temp_width, temp_height);
 
    vendor   = (const char*)glGetString(GL_VENDOR);
    renderer = (const char*)glGetString(GL_RENDERER);
@@ -1110,9 +1110,9 @@ static void *gl1_init(const video_info_t *video,
    if (!string_is_empty(extensions))
       gl1->extensions = string_split(extensions, " ");
 
-   RARCH_LOG("[GL1]: Vendor: %s, Renderer: %s.\n", vendor, renderer);
-   RARCH_LOG("[GL1]: Version: %s.\n", version);
-   RARCH_LOG("[GL1]: Extensions: %s\n", extensions);
+   RARCH_LOG("[GL1] Vendor: %s, Renderer: %s.\n", vendor, renderer);
+   RARCH_LOG("[GL1] Version: %s.\n", version);
+   RARCH_LOG("[GL1] Extensions: %s.\n", extensions);
 
    if (!string_is_empty(version))
       video_driver_set_gpu_api_version_string(version);
@@ -1211,9 +1211,6 @@ static void gl1_set_viewport(gl1_t *gl1,
       bool force_full, bool allow_rotate)
 {
    settings_t *settings     = config_get_ptr();
-   unsigned height          = gl1->video_height;
-   int x                    = 0;
-   int y                    = 0;
    float device_aspect      = (float)vp_width / vp_height;
 
    if (gl1->ctx_driver->translate_aspect)
@@ -2125,7 +2122,6 @@ static uintptr_t gl1_load_texture(void *video_data, void *data,
 #ifdef HAVE_THREADS
    if (threaded)
    {
-      gl1_t                   *gl1 = (gl1_t*)video_data;
       custom_command_method_t func = video_texture_load_wrap_gl1;
 
       return video_thread_texture_handle(data, func);

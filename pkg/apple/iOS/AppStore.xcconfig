@@ -7,11 +7,11 @@
 APPSTORE_BUILD = 1
 
 OTHER_CFLAGS = $(inherited) -DHAVE_APPLE_STORE
-OTHER_CFLAGS = $(inherited) -DHAVE_ICLOUD
-OTHER_CFLAGS = $(inherited) -DkRetroArchAppGroup=@\"group.com.libretro.dist.RetroArchGroup\"
+OTHER_CFLAGS[sdk=iphoneos*] = $(inherited) -DHAVE_ICLOUD_DRIVE
+OTHER_CFLAGS = $(inherited) -DkRetroArchAppGroup=@\"group.com.joemattiello.RetroArchGroup\"
 
-IOS_BUNDLE_IDENTIFIER = com.libretro.dist.RetroArch
-TVOS_BUNDLE_IDENTIFIER = com.libretro.dist.RetroArch
+IOS_BUNDLE_IDENTIFIER = com.joemattiello.RetroArch
+TVOS_BUNDLE_IDENTIFIER = com.joemattiello.RetroArch
 
 IOS_CODE_SIGN_ENTITLEMENTS = iOS/RetroArchiOS.entitlements
 TVOS_CODE_SIGN_ENTITLEMENTS = tvOS/RetroArchTV.entitlements

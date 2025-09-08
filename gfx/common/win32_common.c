@@ -15,6 +15,8 @@
 
 #if !defined(_XBOX)
 
+#define WIN32_LEAN_AND_MEAN
+
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0601 /* Windows 7 */
 #endif
@@ -333,10 +335,11 @@ static INT_PTR_COMPAT CALLBACK pick_core_proc(
    {
       case WM_INITDIALOG:
          {
+            const core_info_t *info = NULL;
             HWND hwndList;
             unsigned i;
-            /* Add items to list.  */
 
+            /* Add items to list.  */
             core_info_get_list(&core_info_list);
             core_info_list_get_supported_cores(core_info_list,
                   path_get(RARCH_PATH_CONTENT), &core_info, &list_size);
@@ -349,8 +352,12 @@ static INT_PTR_COMPAT CALLBACK pick_core_proc(
                SendMessage(hwndList, LB_ADDSTRING, 0,
                      (LPARAM)info->display_name);
             }
+
             /* Select the first item in the list */
             SendMessage(hwndList, LB_SETCURSEL, 0, 0);
+            info = (const core_info_t*)&core_info[0];
+            path_set(RARCH_PATH_CORE, info->path);
+
             SetFocus(hwndList);
             return TRUE;
          }
@@ -624,16 +631,17 @@ static bool win32_drag_query_file(HWND hwnd, WPARAM wparam)
    if (DragQueryFileW((HDROP)wparam, 0xFFFFFFFF, NULL, 0))
    {
       wchar_t wszFilename[4096];
-      bool okay        = false;
+      bool ret        = false;
       char *szFilename = NULL;
       wszFilename[0]   = L'\0';
 
       DragQueryFileW((HDROP)wparam, 0, wszFilename, sizeof(wszFilename));
       szFilename = utf16_to_utf8_string_alloc(wszFilename);
-      okay = win32_load_content_from_gui(szFilename);
+      ret        = win32_load_content_from_gui(szFilename);
       if (szFilename)
          free(szFilename);
-      return okay;
+      if (ret)
+         return true;
    }
    return false;
 }
@@ -716,7 +724,6 @@ static LRESULT win32_menu_loop(HWND owner, WPARAM wparam)
             char win32_file[PATH_MAX_LENGTH] = {0};
             settings_t *settings    = config_get_ptr();
             char    *title_cp       = NULL;
-            size_t converted        = 0;
             const char *extensions  = "Libretro core (.dll)\0*.dll\0All Files\0*.*\0\0";
             const char *title       = msg_hash_to_str(MENU_ENUM_LABEL_VALUE_CORE_LIST);
             const char *initial_dir = settings->paths.directory_libretro;
@@ -755,7 +762,6 @@ static LRESULT win32_menu_loop(HWND owner, WPARAM wparam)
             char win32_file[PATH_MAX_LENGTH] = {0};
             char *title_cp          = NULL;
             wchar_t *title_wide     = NULL;
-            size_t converted        = 0;
             const char *extensions  = "All Files (*.*)\0*.*\0\0";
             const char *title       = msg_hash_to_str(
                   MENU_ENUM_LABEL_VALUE_LOAD_CONTENT_LIST);
@@ -1081,10 +1087,7 @@ static LRESULT CALLBACK wnd_proc_common(
          }
          break;
       case WM_COMMAND:
-         {
-            settings_t *settings     = config_get_ptr();
-            win32_menu_loop(main_window.hwnd, wparam);
-         }
+         win32_menu_loop(main_window.hwnd, wparam);
          break;
    }
    return 0;
@@ -1183,16 +1186,18 @@ static LRESULT CALLBACK wnd_proc_common_internal(HWND hwnd,
             g_win32_flags |= WIN32_CMN_FLAG_TASKBAR_CREATED;
 #endif
          break;
-#ifdef HAVE_CLIP_WINDOW
       case WM_SETFOCUS:
+#ifdef HAVE_CLIP_WINDOW
          if (input_state_get_ptr()->flags & INP_FLAG_GRAB_MOUSE_STATE)
             win32_clip_window(true);
+#endif
          break;
       case WM_KILLFOCUS:
+#ifdef HAVE_CLIP_WINDOW
          if (input_state_get_ptr()->flags & INP_FLAG_GRAB_MOUSE_STATE)
             win32_clip_window(false);
-         break;
 #endif
+         break;
       case WM_DISPLAYCHANGE:  /* Fix size after display mode switch when using SR */
          {
             HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -1456,16 +1461,34 @@ static LRESULT CALLBACK wnd_proc_common_dinput_internal(HWND hwnd,
             g_win32_flags |= WIN32_CMN_FLAG_TASKBAR_CREATED;
 #endif
          break;
-#ifdef HAVE_CLIP_WINDOW
       case WM_SETFOCUS:
+#ifdef HAVE_CLIP_WINDOW
          if (input_state_get_ptr()->flags & INP_FLAG_GRAB_MOUSE_STATE)
             win32_clip_window(true);
+#endif
+#if !defined(_XBOX)
+         {
+            void* input_data = (void*)(LONG_PTR)GetWindowLongPtr(main_window.hwnd, GWLP_USERDATA);
+            if (input_data && dinput_handle_message(input_data,
+                     message, wparam, lparam))
+               return 0;
+         }
+#endif
          break;
       case WM_KILLFOCUS:
+#ifdef HAVE_CLIP_WINDOW
          if (input_state_get_ptr()->flags & INP_FLAG_GRAB_MOUSE_STATE)
             win32_clip_window(false);
-         break;
 #endif
+#if !defined(_XBOX)
+         {
+            void* input_data = (void*)(LONG_PTR)GetWindowLongPtr(main_window.hwnd, GWLP_USERDATA);
+            if (input_data && dinput_handle_message(input_data,
+                     message, wparam, lparam))
+               return 0;
+         }
+#endif
+         break;
       case WM_DISPLAYCHANGE:  /* Fix size after display mode switch when using SR */
          {
             HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -1849,7 +1872,7 @@ bool win32_window_create(void *data, unsigned style,
       main_window.hwnd, &notification_filter, DEVICE_NOTIFY_WINDOW_HANDLE);
 
    if (!notification_handler)
-      RARCH_ERR("Error registering for notifications\n");
+      RARCH_ERR("[Win32] Error registering for notifications.\n");
 #endif
 
    video_driver_display_type_set(RARCH_DISPLAY_WIN32);
@@ -2414,7 +2437,7 @@ void win32_set_style(MONITORINFOEX *current_mon, HMONITOR *hm_to_use,
          if (win32_monitor_set_fullscreen(*width, *height,
                (int)refresh_rate, false, current_mon->szDevice))
          {
-            RARCH_LOG("[Video]: Fullscreen set to %ux%u @ %uHz on device %s.\n",
+            RARCH_LOG("[Video] Fullscreen set to %ux%u @ %uHz on device %s.\n",
                   *width, *height, (int)refresh_rate, current_mon->szDevice);
          }
 
@@ -2563,7 +2586,7 @@ bool win32_set_video_mode(void *data,
    {
       if (res == -1)
       {
-         RARCH_ERR("GetMessage error code %d\n", GetLastError());
+         RARCH_ERR("[Win32] GetMessage error code %d.\n", GetLastError());
          break;
       }
 

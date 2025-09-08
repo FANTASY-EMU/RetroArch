@@ -228,7 +228,7 @@ GLuint gl3_compile_shader(GLenum stage, const char *source)
          if (info_log)
          {
             glGetShaderInfoLog(shader, length, &length, info_log);
-            RARCH_ERR("[GLCore]: Failed to compile shader: %s\n", info_log);
+            RARCH_ERR("[GLCore] Failed to compile shader: %s\n", info_log);
             free(info_log);
             glDeleteShader(shader);
             return 0;
@@ -1100,7 +1100,7 @@ static bool gl3_init_pbo_readback(gl3_t *gl)
    if (!scaler_ctx_gen_filter(scaler))
    {
       gl->flags &= ~GL3_FLAG_PBO_READBACK_ENABLE;
-      RARCH_ERR("[GLCore]: Failed to initialize pixel conversion for PBO.\n");
+      RARCH_ERR("[GLCore] Failed to initialize pixel conversion for PBO.\n");
       glDeleteBuffers(4, gl->pbo_readback);
       memset(gl->pbo_readback, 0, sizeof(gl->pbo_readback));
       return false;
@@ -1332,6 +1332,10 @@ static void gl3_destroy_resources(gl3_t *gl)
       gl3_filter_chain_free(gl->filter_chain);
    gl->filter_chain = NULL;
 
+   if (gl->filter_chain_default)
+      gl3_filter_chain_free(gl->filter_chain_default);
+   gl->filter_chain_default = NULL;
+
    glBindVertexArray(0);
    if (gl->vao != 0)
       glDeleteVertexArrays(1, &gl->vao);
@@ -1380,10 +1384,10 @@ static bool gl3_init_hw_render(gl3_t *gl, unsigned width, unsigned height)
    if (gl->flags & GL3_FLAG_USE_SHARED_CONTEXT)
       gl->ctx_driver->bind_hw_render(gl->ctx_data, true);
 
-   RARCH_LOG("[GLCore]: Initializing HW render (%ux%u).\n", width, height);
+   RARCH_LOG("[GLCore] Initializing HW render (%ux%u).\n", width, height);
    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_fbo_size);
    glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_rb_size);
-   RARCH_LOG("[GLCore]: Max texture size: %d px, renderbuffer size: %d px.\n",
+   RARCH_LOG("[GLCore] Max texture size: %d px, renderbuffer size: %d px.\n",
              max_fbo_size, max_rb_size);
 
    if (width > (unsigned)max_fbo_size)
@@ -1425,7 +1429,7 @@ static bool gl3_init_hw_render(gl3_t *gl, unsigned width, unsigned height)
    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
    if (status != GL_FRAMEBUFFER_COMPLETE)
    {
-      RARCH_ERR("[GLCore]: Framebuffer is not complete.\n");
+      RARCH_ERR("[GLCore] Framebuffer is not complete.\n");
       if (gl->flags & GL3_FLAG_USE_SHARED_CONTEXT)
          gl->ctx_driver->bind_hw_render(gl->ctx_data, false);
       return false;
@@ -1612,10 +1616,6 @@ static void gl3_set_viewport(gl3_t *gl,
    gl->filter_chain_vp.y = gl->vp.y;
    gl->filter_chain_vp.width = gl->vp.width;
    gl->filter_chain_vp.height = gl->vp.height;
-
-#if 0
-   RARCH_LOG("Setting viewport @ %ux%u\n", vp_width, vp_height);
-#endif
 }
 
 static bool gl3_init_pipelines(gl3_t *gl)
@@ -1710,14 +1710,17 @@ static bool gl3_init_default_filter_chain(gl3_t *gl)
    if (!gl->ctx_driver)
       return false;
 
-   gl->filter_chain = gl3_filter_chain_create_default(
+   if (gl->filter_chain_default)
+      return true;
+
+   gl->filter_chain_default = gl3_filter_chain_create_default(
          gl->video_info.smooth
          ? GLSLANG_FILTER_CHAIN_LINEAR
          : GLSLANG_FILTER_CHAIN_NEAREST);
 
-   if (!gl->filter_chain)
+   if (!gl->filter_chain_default)
    {
-      RARCH_ERR("Failed to create filter chain.\n");
+      RARCH_ERR("[GLCore] Failed to create default filter chain.\n");
       return false;
    }
 
@@ -1726,6 +1729,9 @@ static bool gl3_init_default_filter_chain(gl3_t *gl)
 
 static bool gl3_init_filter_chain_preset(gl3_t *gl, const char *shader_path)
 {
+   if (!gl->ctx_driver)
+      return false;
+
    gl->filter_chain = gl3_filter_chain_create_from_preset(
          shader_path,
          gl->video_info.smooth
@@ -1734,7 +1740,7 @@ static bool gl3_init_filter_chain_preset(gl3_t *gl, const char *shader_path)
 
    if (!gl->filter_chain)
    {
-      RARCH_ERR("[GLCore]: Failed to create preset: \"%s\".\n", shader_path);
+      RARCH_ERR("[GLCore] Failed to create preset: \"%s\".\n", shader_path);
       return false;
    }
 
@@ -1748,13 +1754,13 @@ static bool gl3_init_filter_chain(gl3_t *gl)
 
    if (string_is_empty(shader_path))
    {
-      RARCH_LOG("[GLCore]: Loading stock shader.\n");
+      RARCH_LOG("[GLCore] Loading stock shader.\n");
       return gl3_init_default_filter_chain(gl);
    }
 
    if (type != RARCH_SHADER_SLANG)
    {
-      RARCH_WARN("[GLCore]: Only Slang shaders are supported, falling back to stock.\n");
+      RARCH_WARN("[GLCore] Only Slang shaders are supported, falling back to stock.\n");
       return gl3_init_default_filter_chain(gl);
    }
 
@@ -1862,13 +1868,13 @@ static void DEBUG_CALLBACK_TYPE gl3_debug_cb(GLenum source, GLenum type,
    switch (severity)
    {
       case GL_DEBUG_SEVERITY_HIGH:
-         RARCH_ERR("[GL debug (High, %s, %s)]: %s\n", src, typestr, message);
+         RARCH_ERR("[GL debug (High, %s, %s)] %s\n", src, typestr, message);
          break;
       case GL_DEBUG_SEVERITY_MEDIUM:
-         RARCH_WARN("[GL debug (Medium, %s, %s)]: %s\n", src, typestr, message);
+         RARCH_WARN("[GL debug (Medium, %s, %s)] %s\n", src, typestr, message);
          break;
       case GL_DEBUG_SEVERITY_LOW:
-         RARCH_LOG("[GL debug (Low, %s, %s)]: %s\n", src, typestr, message);
+         RARCH_LOG("[GL debug (Low, %s, %s)] %s\n", src, typestr, message);
          break;
    }
 }
@@ -1890,7 +1896,7 @@ static void gl3_begin_debug(gl3_t *gl)
 #endif
    }
    else
-      RARCH_ERR("[GLCore]: Neither GL_KHR_debug nor GL_ARB_debug_output are implemented. Cannot start GL debugging.\n");
+      RARCH_ERR("[GLCore] Neither GL_KHR_debug nor GL_ARB_debug_output are implemented. Cannot start GL debugging.\n");
 }
 #endif
 
@@ -1934,7 +1940,7 @@ static void *gl3_init(const video_info_t *video,
    gl->ctx_driver = ctx_driver;
    gl->video_info = *video;
 
-   RARCH_LOG("[GLCore]: Found GL context: \"%s\".\n", ctx_driver->ident);
+   RARCH_LOG("[GLCore] Found GL context: \"%s\".\n", ctx_driver->ident);
 
    if (gl->ctx_driver->get_video_size)
       gl->ctx_driver->get_video_size(gl->ctx_data,
@@ -1942,7 +1948,7 @@ static void *gl3_init(const video_info_t *video,
 
    if (!video->fullscreen && !gl->ctx_driver->has_windowed)
    {
-      RARCH_DBG("[GLCore]: Config requires windowed mode, but context driver does not support it. "
+      RARCH_DBG("[GLCore] Config requires windowed mode, but context driver does not support it. "
                 "Forcing fullscreen for this session.\n");
       force_fullscreen = true;
    }
@@ -1953,7 +1959,7 @@ static void *gl3_init(const video_info_t *video,
    mode_height = 0;
    interval    = 0;
 
-   RARCH_LOG("[GLCore]: Detecting screen resolution: %ux%u.\n", full_x, full_y);
+   RARCH_LOG("[GLCore] Detecting screen resolution: %ux%u.\n", full_x, full_y);
 
    if (video->vsync)
       interval = video->swap_interval;
@@ -2014,15 +2020,15 @@ static void *gl3_init(const video_info_t *video,
    renderer = (const char*)glGetString(GL_RENDERER);
    version  = (const char*)glGetString(GL_VERSION);
 
-   RARCH_LOG("[GLCore]: Vendor: %s, Renderer: %s.\n", vendor, renderer);
-   RARCH_LOG("[GLCore]: Version: %s.\n", version);
+   RARCH_LOG("[GLCore] Vendor: %s, Renderer: %s.\n", vendor, renderer);
+   RARCH_LOG("[GLCore] Version: %s.\n", version);
 
    if (string_is_equal(ctx_driver->ident, "null"))
       goto error;
 
    if (!gl3_init_pipelines(gl))
    {
-      RARCH_ERR("[GLCore]: Failed to cross-compile menu pipelines.\n");
+      RARCH_ERR("[GLCore] Failed to cross-compile menu pipelines.\n");
       goto error;
    }
 
@@ -2066,7 +2072,7 @@ static void *gl3_init(const video_info_t *video,
    gl->video_width  = temp_width;
    gl->video_height = temp_height;
 
-   RARCH_LOG("[GLCore]: Using resolution %ux%u.\n", temp_width, temp_height);
+   RARCH_LOG("[GLCore] Using resolution %ux%u.\n", temp_width, temp_height);
 
    /* Set the viewport to fix recording, since it needs to know
     * the viewport sizes before we start running. */
@@ -2082,7 +2088,7 @@ static void *gl3_init(const video_info_t *video,
 
    if (!gl3_init_filter_chain(gl))
    {
-      RARCH_ERR("[GLCore]: Failed to init filter chain.\n");
+      RARCH_ERR("[GLCore] Failed to init filter chain.\n");
       goto error;
    }
 
@@ -2099,7 +2105,7 @@ static void *gl3_init(const video_info_t *video,
       gl->flags |=  GL3_FLAG_PBO_READBACK_ENABLE;
       if (gl3_init_pbo_readback(gl))
       {
-         RARCH_LOG("[GLCore]: Async PBO readback enabled.\n");
+         RARCH_LOG("[GLCore] Async PBO readback enabled.\n");
       }
    }
    else
@@ -2107,7 +2113,7 @@ static void *gl3_init(const video_info_t *video,
 
    if (!gl_check_error(&error_string))
    {
-      RARCH_ERR("%s\n", error_string);
+      RARCH_ERR("[GLCore] %s\n", error_string);
       free(error_string);
       goto error;
    }
@@ -2421,7 +2427,7 @@ static bool gl3_set_shader(void *data,
 
    if (!string_is_empty(path) && type != RARCH_SHADER_SLANG)
    {
-      RARCH_WARN("[GLCore]: Only Slang shaders are supported. Falling back to stock.\n");
+      RARCH_WARN("[GLCore] Only Slang shaders are supported. Falling back to stock.\n");
       path = NULL;
    }
 
@@ -2433,7 +2439,7 @@ static bool gl3_set_shader(void *data,
 
    if (!gl3_init_filter_chain_preset(gl, path))
    {
-      RARCH_ERR("[GLCore]: Failed to create filter chain: \"%s\". Falling back to stock.\n", path);
+      RARCH_ERR("[GLCore] Failed to create filter chain: \"%s\". Falling back to stock.\n", path);
       gl3_init_default_filter_chain(gl);
       if (gl->flags & GL3_FLAG_USE_SHARED_CONTEXT)
          gl->ctx_driver->bind_hw_render(gl->ctx_data, true);
@@ -2650,6 +2656,7 @@ static bool gl3_frame(void *data, const void *frame,
 {
    struct gl3_filter_chain_texture texture;
    struct gl3_streamed_texture *streamed   = NULL;
+   gl3_filter_chain_t *filter_chain        = NULL;
    gl3_t *gl                               = (gl3_t*)data;
    unsigned width                          = video_info->width;
    unsigned height                         = video_info->height;
@@ -2734,26 +2741,44 @@ static bool gl3_frame(void *data, const void *frame,
       texture.padded_width  = streamed->width;
       texture.padded_height = streamed->height;
    }
-   gl3_filter_chain_set_frame_count(gl->filter_chain, frame_count);
+
+   /* Fast toggle shader filter chain logic */
+   filter_chain = gl->filter_chain;
+
+   if (!video_info->shader_active && gl->filter_chain != gl->filter_chain_default)
+   {
+      if (!gl->filter_chain_default)
+         gl3_init_default_filter_chain(gl);
+
+      if (gl->filter_chain_default)
+         filter_chain = gl->filter_chain_default;
+      else
+         return false;
+   }
+
+   if (!filter_chain && gl->filter_chain_default)
+      filter_chain = gl->filter_chain_default;
+
+   gl3_filter_chain_set_frame_count(filter_chain, frame_count);
 #ifdef HAVE_REWIND
-   gl3_filter_chain_set_frame_direction(gl->filter_chain, state_manager_frame_is_reversed() ? -1 : 1);
+   gl3_filter_chain_set_frame_direction(filter_chain, state_manager_frame_is_reversed() ? -1 : 1);
 #else
-   gl3_filter_chain_set_frame_direction(gl->filter_chain, 1);
+   gl3_filter_chain_set_frame_direction(filter_chain, 1);
 #endif
-   gl3_filter_chain_set_frame_time_delta(gl->filter_chain, (uint32_t)video_driver_get_frame_time_delta_usec());
+   gl3_filter_chain_set_frame_time_delta(filter_chain, (uint32_t)video_driver_get_frame_time_delta_usec());
 
-   gl3_filter_chain_set_original_fps(gl->filter_chain, video_driver_get_original_fps());
+   gl3_filter_chain_set_original_fps(filter_chain, video_driver_get_original_fps());
 
-   gl3_filter_chain_set_rotation(gl->filter_chain, retroarch_get_rotation());
+   gl3_filter_chain_set_rotation(filter_chain, retroarch_get_rotation());
 
-   gl3_filter_chain_set_core_aspect(gl->filter_chain, video_driver_get_core_aspect());
+   gl3_filter_chain_set_core_aspect(filter_chain, video_driver_get_core_aspect());
 
    /* OriginalAspectRotated: return 1/aspect for 90 and 270 rotated content */
    uint32_t rot = retroarch_get_rotation();
    float core_aspect_rot = video_driver_get_core_aspect();
    if (rot == 1 || rot == 3)
       core_aspect_rot = 1/core_aspect_rot;
-   gl3_filter_chain_set_core_aspect_rot(gl->filter_chain, core_aspect_rot);
+   gl3_filter_chain_set_core_aspect_rot(filter_chain, core_aspect_rot);
 
    /* Sub-frame info for multiframe shaders (per real content frame).
       Should always be 1 for non-use of subframes*/
@@ -2765,13 +2790,13 @@ static bool gl3_frame(void *data, const void *frame,
            || video_info->runloop_is_paused
            || (gl->flags & GL3_FLAG_MENU_TEXTURE_ENABLE))
         gl3_filter_chain_set_shader_subframes(
-           gl->filter_chain, 1);
+           filter_chain, 1);
      else
         gl3_filter_chain_set_shader_subframes(
-           gl->filter_chain, video_info->shader_subframes);
+           filter_chain, video_info->shader_subframes);
 
      gl3_filter_chain_set_current_shader_subframe(
-           gl->filter_chain, 1);
+           filter_chain, 1);
    }
 
 #ifdef GL3_ROLLING_SCANLINE_SIMULATION
@@ -2783,25 +2808,25 @@ static bool gl3_frame(void *data, const void *frame,
          &&  !video_info->runloop_is_paused
          &&  (!(gl->flags & GL3_FLAG_MENU_TEXTURE_ENABLE)))
       gl3_filter_chain_set_simulate_scanline(
-            gl->filter_chain, true);
+            filter_chain, true);
    else
       gl3_filter_chain_set_simulate_scanline(
-            gl->filter_chain, false);
+            filter_chain, false);
 #endif /* GL3_ROLLING_SCANLINE_SIMULATION */
 
-   gl3_filter_chain_set_input_texture(gl->filter_chain, &texture);
-   gl3_filter_chain_build_offscreen_passes(gl->filter_chain,
+   gl3_filter_chain_set_input_texture(filter_chain, &texture);
+   gl3_filter_chain_build_offscreen_passes(filter_chain,
          &gl->filter_chain_vp);
 
    glBindFramebuffer(GL_FRAMEBUFFER, 0);
    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
    glClear(GL_COLOR_BUFFER_BIT);
-   gl3_filter_chain_build_viewport_pass(gl->filter_chain,
+   gl3_filter_chain_build_viewport_pass(filter_chain,
          &gl->filter_chain_vp,
          (gl->flags & GL3_FLAG_HW_RENDER_BOTTOM_LEFT)
          ? gl->mvp.data
          : gl->mvp_yflip.data);
-   gl3_filter_chain_end_frame(gl->filter_chain);
+   gl3_filter_chain_end_frame(filter_chain);
 
 #ifdef HAVE_OVERLAY
    if ((gl->flags & GL3_FLAG_OVERLAY_ENABLE) && overlay_behind_menu)
@@ -2940,9 +2965,9 @@ static bool gl3_frame(void *data, const void *frame,
       for (i = 1; i < (int) video_info->shader_subframes; i++)
       {
          gl3_filter_chain_set_shader_subframes(
-            gl->filter_chain, video_info->shader_subframes);
+            filter_chain, video_info->shader_subframes);
          gl3_filter_chain_set_current_shader_subframe(
-            gl->filter_chain, i+1);
+            filter_chain, i+1);
 
          if (!gl3_frame(gl, NULL, 0, 0, frame_count, 0, msg,
                   video_info))
@@ -2975,6 +3000,7 @@ static uint32_t gl3_get_flags(void *data)
    BIT32_SET(flags, GFX_CTX_FLAGS_SCREENSHOTS_SUPPORTED);
    BIT32_SET(flags, GFX_CTX_FLAGS_OVERLAY_BEHIND_MENU_SUPPORTED);
    BIT32_SET(flags, GFX_CTX_FLAGS_SUBFRAME_SHADERS);
+   BIT32_SET(flags, GFX_CTX_FLAGS_FAST_TOGGLE_SHADERS);
 
    return flags;
 }

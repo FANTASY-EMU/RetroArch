@@ -190,7 +190,7 @@ struct retro_microphone
     * The ratio of the core-requested sample rate to the device's opened sample rate.
     * If this is (almost) equal to 1, then resampling will be skipped.
     */
-   double original_ratio;
+   double orig_ratio;
 };
 
 /**
@@ -650,6 +650,11 @@ extern microphone_driver_t microphone_coreaudio;
  * The PipeWire-backed microphone driver.
  */
 extern microphone_driver_t microphone_pipewire;
+
+/**
+ * The CoreAudio-backed microphone driver.
+ */
+extern microphone_driver_t microphone_coreaudio;
 
 /**
  * @return Pointer to the global microphone driver state.

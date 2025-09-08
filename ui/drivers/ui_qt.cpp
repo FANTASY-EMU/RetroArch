@@ -14,6 +14,7 @@
  * If not, see <http://www.gnu.org/licenses/>.
  */
 
+#define WIN32_LEAN_AND_MEAN
 #include <QApplication>
 #include <QAbstractEventDispatcher>
 #include <QtWidgets>
@@ -2250,8 +2251,8 @@ QString MainWindow::changeThumbnail(const QImage &image, QString type)
    QString dirString            = m_playlistModel->getPlaylistThumbnailsDir(
                                       hash["db_name"])
                                 + QStringLiteral("/") + type;
-   QString thumbPath            = dirString + QStringLiteral("/")
-                                + m_playlistModel->getSanitizedThumbnailName(
+   QString thumbPath            = m_playlistModel->getSanitizedThumbnailName(
+                                      dirString + QStringLiteral("/"),
                                       hash["label_noext"]);
    QByteArray   dirArray        = QDir::toNativeSeparators(dirString).toUtf8();
    const char   *dirData        = dirArray.constData();
@@ -2265,10 +2266,10 @@ QString MainWindow::changeThumbnail(const QImage &image, QString type)
    {
       if (!dir.mkpath("."))
       {
-         RARCH_ERR("[Qt]: Could not create directory: %s\n", dirData);
+         RARCH_ERR("[Qt] Could not create directory: \"%s\".\n", dirData);
          return QString();
       }
-      RARCH_LOG("[Qt]: Created directory: %s\n", dirData);
+      RARCH_LOG("[Qt] Created directory: \"%s\".\n", dirData);
    }
 
    if (m_settings->contains("thumbnail_max_size"))
@@ -2285,14 +2286,14 @@ QString MainWindow::changeThumbnail(const QImage &image, QString type)
 
    if (scaledImage.save(thumbPath, "png", quality))
    {
-      RARCH_LOG("[Qt]: Saved image: %s\n", thumbData);
+      RARCH_LOG("[Qt] Saved image: \"%s\".\n", thumbData);
       m_playlistModel->reloadThumbnailPath(thumbPath);
       updateVisibleItems();
 
       return thumbPath;
    }
 
-   RARCH_ERR("[Qt]: Could not save image: %s\n", thumbData);
+   RARCH_ERR("[Qt] Could not save image: \"%s\".\n", thumbData);
    return QString();
 }
 
@@ -3572,7 +3573,7 @@ void MainWindow::renamePlaylistItem(QListWidgetItem *item, QString newName)
 
    if (!file.rename(newPath))
    {
-      RARCH_ERR("[Qt]: Could not rename playlist.\n");
+      RARCH_ERR("[Qt] Could not rename playlist.\n");
       item->setText(oldName);
    }
 
@@ -3618,13 +3619,23 @@ void MainWindow::onCurrentItemChanged(const QHash<QString, QString> &hash)
    {
       QString thumbnailsDir = m_playlistModel->getPlaylistThumbnailsDir(
             hash["db_name"]);
-      QString thumbnailName = m_playlistModel->getSanitizedThumbnailName(
+      QString thumbnailName1 = m_playlistModel->getSanitizedThumbnailName(
+            thumbnailsDir + QStringLiteral("/") + THUMBNAIL_BOXART     + QStringLiteral("/"),
+            hash["label_noext"]);
+      QString thumbnailName2 = m_playlistModel->getSanitizedThumbnailName(
+            thumbnailsDir + QStringLiteral("/") + THUMBNAIL_TITLE      + QStringLiteral("/"),
+            hash["label_noext"]);
+      QString thumbnailName3 = m_playlistModel->getSanitizedThumbnailName(
+            thumbnailsDir + QStringLiteral("/") + THUMBNAIL_SCREENSHOT + QStringLiteral("/"),
+            hash["label_noext"]);
+      QString thumbnailName4 = m_playlistModel->getSanitizedThumbnailName(
+            thumbnailsDir + QStringLiteral("/") + THUMBNAIL_LOGO       + QStringLiteral("/"),
             hash["label_noext"]);
 
-      m_thumbnailPixmap     = new QPixmap(thumbnailsDir + QStringLiteral("/") + THUMBNAIL_BOXART + QStringLiteral("/") + thumbnailName);
-      m_thumbnailPixmap2    = new QPixmap(thumbnailsDir + QStringLiteral("/") + THUMBNAIL_TITLE  + QStringLiteral("/") + thumbnailName);
-      m_thumbnailPixmap3    = new QPixmap(thumbnailsDir + QStringLiteral("/") + THUMBNAIL_SCREENSHOT + QStringLiteral("/") + thumbnailName);
-      m_thumbnailPixmap4    = new QPixmap(thumbnailsDir + QStringLiteral("/") + THUMBNAIL_LOGO + QStringLiteral("/") + thumbnailName);
+      m_thumbnailPixmap     = new QPixmap(thumbnailName1);
+      m_thumbnailPixmap2    = new QPixmap(thumbnailName2);
+      m_thumbnailPixmap3    = new QPixmap(thumbnailName3);
+      m_thumbnailPixmap4    = new QPixmap(thumbnailName4);
 
       if (      m_currentBrowser == BROWSER_TYPE_PLAYLISTS
             && !currentPlaylistIsSpecial())
@@ -4160,7 +4171,7 @@ int MainWindow::onExtractArchive(QString path, QString extractionDir,
    {
       showMessageBox("Error: Archive is empty.",
             MainWindow::MSGBOX_TYPE_ERROR, Qt::ApplicationModal, false);
-      RARCH_ERR("[Qt]: Downloaded archive is empty?\n");
+      RARCH_ERR("[Qt] Downloaded archive is empty?\n");
       return -1;
    }
 
@@ -4183,7 +4194,7 @@ int MainWindow::onExtractArchive(QString path, QString extractionDir,
                   showMessageBox(msg_hash_to_str(
                            MENU_ENUM_LABEL_VALUE_QT_COULD_NOT_DELETE_FILE),
                         MainWindow::MSGBOX_TYPE_ERROR, Qt::ApplicationModal, false);
-                  RARCH_ERR("[Qt]: Could not delete file: %s\n", file_list->elems[i].data);
+                  RARCH_ERR("[Qt] Could not delete file: \"%s\".\n", file_list->elems[i].data);
                   return -1;
                }
             }
@@ -4193,7 +4204,7 @@ int MainWindow::onExtractArchive(QString path, QString extractionDir,
                showMessageBox(msg_hash_to_str(
                         MENU_ENUM_LABEL_VALUE_QT_COULD_NOT_RENAME_FILE),
                      MainWindow::MSGBOX_TYPE_ERROR, Qt::ApplicationModal, false);
-               RARCH_ERR("[Qt]: Could not rename file: %s\n", file_list->elems[i].data);
+               RARCH_ERR("[Qt] Could not rename file: \"%s\".\n", file_list->elems[i].data);
                return -1;
             }
          }
@@ -4563,7 +4574,7 @@ void ThumbnailWidget::dropEvent(QDropEvent *event)
       {
          const char *string_data = QDir::toNativeSeparators(
                imageString).toUtf8().constData();
-         RARCH_ERR("[Qt]: Could not read image: %s\n", string_data);
+         RARCH_ERR("[Qt] Could not read image: \"%s\".\n", string_data);
       }
    }
 }
@@ -5254,7 +5265,7 @@ static void ui_companion_qt_event_command(void *data, enum event_command cmd)
       case CMD_EVENT_SHADER_PRESET_LOADED:
 #if defined(HAVE_MENU)
 #if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
-         RARCH_LOG("[Qt]: Reloading shader parameters.\n");
+         RARCH_LOG("[Qt] Reloading shader parameters.\n");
          win_handle->qtWindow->deferReloadShaderParams();
 #endif
 #endif

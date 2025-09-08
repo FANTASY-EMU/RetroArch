@@ -13,6 +13,7 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 #ifdef CXX_BUILD
@@ -158,7 +159,7 @@ static void winraw_log_mice_info(winraw_mouse_t *mice, unsigned mouse_cnt)
 
       input_config_set_mouse_display_name(i, name);
 
-      RARCH_LOG("[WinRaw]: Mouse #%u: \"%s\".\n", i + 1, name);
+      RARCH_LOG("[WinRaw] Mouse #%u: \"%s\".\n", i + 1, name);
    }
 }
 
@@ -327,8 +328,6 @@ static void winraw_update_mouse_state(winraw_input_t *wr,
       }
       else
       {
-         int bottom      = wr->prev_rect.bottom;
-         int right       = wr->prev_rect.right;
          wr->active_rect = wr->prev_rect;
          winraw_init_mouse_xy_mapping(wr);
          wr->rect_delay  = 0;
@@ -374,9 +373,9 @@ static void winraw_update_mouse_state(winraw_input_t *wr,
          InterlockedExchangeAdd(&mouse->dlt_y, state->lLastY);
 
          if (!GetCursorPos(&crs_pos))
-            RARCH_DBG("[WinRaw]: GetCursorPos failed with error %lu.\n", GetLastError());
+            RARCH_DBG("[WinRaw] GetCursorPos failed with error %lu.\n", GetLastError());
          else if (!ScreenToClient((HWND)video_driver_window_get(), &crs_pos))
-            RARCH_DBG("[WinRaw]: ScreenToClient failed with error %lu.\n", GetLastError());
+            RARCH_DBG("[WinRaw] ScreenToClient failed with error %lu.\n", GetLastError());
       }
       else
       {
@@ -638,6 +637,10 @@ static void winraw_poll(void *data)
 
    for (i = 0; i < wr->mouse_cnt; ++i)
    {
+      /* Clear buttons when not focused */
+      if (!winraw_focus)
+         g_mice[i].flags = 0;
+
       wr->mice[i].x       = g_mice[i].x;
       wr->mice[i].y       = g_mice[i].y;
       wr->mice[i].dlt_x   = InterlockedExchange(&g_mice[i].dlt_x, 0);

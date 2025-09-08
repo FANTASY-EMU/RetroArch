@@ -754,7 +754,7 @@ static core_info_cache_list_t *core_info_cache_read(const char *info_dir)
    /* Parse info cache file */
    if (!(parser = rjson_open_stream(file)))
    {
-      RARCH_ERR("[Core Info]: Failed to create JSON parser.\n");
+      RARCH_ERR("[Core info] Failed to create JSON parser.\n");
       goto end;
    }
 
@@ -776,10 +776,10 @@ static core_info_cache_list_t *core_info_cache_read(const char *info_dir)
          NULL) /* Unused null handler */
          != RJSON_DONE)
    {
-      RARCH_WARN("[Core Info]: Error parsing chunk:\n---snip---\n%.*s\n---snip---\n",
+      RARCH_WARN("[Core info] Error parsing chunk:\n---snip---\n%.*s\n---snip---\n",
             rjson_get_source_context_len(parser),
             rjson_get_source_context_buf(parser));
-      RARCH_WARN("[Core Info]: Error: Invalid JSON at line %d, column %d - %s.\n",
+      RARCH_WARN("[Core info] Error: Invalid JSON at line %d, column %d - %s.\n",
             (int)rjson_get_source_line(parser),
             (int)rjson_get_source_column(parser),
             (*rjson_get_error(parser)
@@ -812,7 +812,7 @@ static core_info_cache_list_t *core_info_cache_read(const char *info_dir)
        || !string_is_equal(core_info_cache_list->version,
             CORE_INFO_CACHE_VERSION))
    {
-      RARCH_WARN("[Core Info]: Core info cache has invalid version"
+      RARCH_WARN("[Core info] Core info cache has invalid version"
             " - forcing refresh (required v%s, found v%s).\n",
             CORE_INFO_CACHE_VERSION,
             core_info_cache_list->version);
@@ -858,14 +858,14 @@ static bool core_info_cache_write(core_info_cache_list_t *list, const char *info
 
    if (!file)
    {
-      RARCH_ERR("[Core Info]: Failed to write core info cache file: \"%s\".\n", file_path);
+      RARCH_ERR("[Core info] Failed to write core info cache file: \"%s\".\n", file_path);
       return false;
    }
 
    /* Write info cache */
    if (!(writer = rjsonwriter_open_stream(file)))
    {
-      RARCH_ERR("[Core Info]: Failed to create JSON writer.\n");
+      RARCH_ERR("[Core info] Failed to create JSON writer.\n");
       goto end;
    }
 
@@ -1188,7 +1188,7 @@ static bool core_info_cache_write(core_info_cache_list_t *list, const char *info
    rjsonwriter_raw(writer, "\n", 1);
    rjsonwriter_free(writer);
 
-   RARCH_LOG("[Core Info]: Wrote to cache file: \"%s\".\n", file_path);
+   RARCH_LOG("[Core info] Wrote to cache file: \"%s\".\n", file_path);
    success = true;
 
    /* Remove 'force refresh' file, if required */
@@ -1549,7 +1549,7 @@ static size_t core_info_get_file_id(const char *core_filename,
       char *s, size_t len)
 {
    size_t _len;
-   char *last_underscore = NULL;
+   char *pos = NULL;
    if (string_is_empty(core_filename))
       return 0;
    /* Core file 'id' is filename without extension
@@ -1563,15 +1563,19 @@ static size_t core_info_get_file_id(const char *core_filename,
     * Since core names include underscore, which is not allowed, but not dot,
     * which is, we change underscore to dot. Here, we need to change it back.
     */
-   string_replace_all_chars(s, '.', '_');
+   for (pos = s; *pos != '\0'; pos++)
+   {
+      if (*pos == '.')
+         *pos = '-';
+   }
 #endif
    /* > Remove suffix */
-   last_underscore = (char*)strrchr(s, '_');
-   if (   !string_is_empty(last_underscore)
-       && !string_is_equal(last_underscore, "_libretro"))
+   pos = (char*)strrchr(s, '_');
+   if (   !string_is_empty(pos)
+       && !string_is_equal(pos, "_libretro"))
    {
-      *last_underscore = '\0';
-      _len = strlen(s); /* TODO/FIXME - make this unnecessary later on */
+      *pos = '\0';
+      _len = pos - s;
    }
    return _len;
 }
@@ -1878,9 +1882,10 @@ static void core_info_parse_config_file(
    list->info_count++;
 }
 
-static void core_info_list_resolve_all_extensions(
+static size_t core_info_list_resolve_all_extensions(
       core_info_list_t *core_info_list)
 {
+   size_t _len;
    size_t i              = 0;
    size_t all_ext_len    = 0;
    char *all_ext         = NULL;
@@ -1894,26 +1899,29 @@ static void core_info_list_resolve_all_extensions(
 
    all_ext_len       += STRLEN_CONST("7z|") + STRLEN_CONST("zip|");
    if (!(all_ext      = (char*)calloc(1, all_ext_len)))
-      return;
+      return 0;
 
    core_info_list->all_ext = all_ext;
+   _len                    = strlen(all_ext);
 
    for (i = 0; i < core_info_list->count; i++)
    {
-      size_t _len;
       if (!core_info_list->list[i].supported_extensions)
          continue;
 
-      _len = strlcat(core_info_list->all_ext,
-            core_info_list->list[i].supported_extensions, all_ext_len);
-      strlcpy(core_info_list->all_ext + _len, "|", all_ext_len - _len);
+      _len += strlcpy(core_info_list->all_ext + _len,
+            core_info_list->list[i].supported_extensions,
+                      all_ext_len - _len);
+      _len += strlcpy(core_info_list->all_ext + _len, "|",
+                      all_ext_len - _len);
    }
 #ifdef HAVE_7ZIP
-   strlcat(core_info_list->all_ext, "7z|", all_ext_len);
+   _len += strlcpy(core_info_list->all_ext + _len, "7z|", all_ext_len - _len);
 #endif
 #ifdef HAVE_ZLIB
-   strlcat(core_info_list->all_ext, "zip|", all_ext_len);
+   _len += strlcpy(core_info_list->all_ext + _len, "zip|", all_ext_len - _len);
 #endif
+   return _len;
 }
 
 static void core_info_free(core_info_t* info)
@@ -2787,34 +2795,15 @@ bool core_info_current_supports_savestate(void)
    core_info_state_t *p_coreinfo   = &core_info_st;
    settings_t        *settings     = config_get_ptr();
    bool core_info_savestate_bypass = settings->bools.core_info_savestate_bypass;
-   
-   /* 【Fantasy调试】打印存档支持检查信息 */
-   RARCH_LOG("[Fantasy Debug] === Savestate Support Check ===\n");
-   RARCH_LOG("[Fantasy Debug] core_info_savestate_bypass: %s\n", core_info_savestate_bypass ? "true" : "false");
-   
    if (core_info_savestate_bypass)
-   {
-      RARCH_LOG("[Fantasy Debug] Bypass enabled - returning true\n");
       return true;
-   }
    /* If no core is currently loaded, assume
     * by default that all savestate functionality
     * is supported */
    if (!p_coreinfo->current)
-   {
-      RARCH_LOG("[Fantasy Debug] No current core - returning true\n");
       return true;
-   }
-   
-   RARCH_LOG("[Fantasy Debug] Current core: %s\n", p_coreinfo->current->core_name ? p_coreinfo->current->core_name : "Unknown");
-   RARCH_LOG("[Fantasy Debug] Savestate support level: %d (need >= %d)\n", 
-             p_coreinfo->current->savestate_support_level, CORE_INFO_SAVESTATE_BASIC);
-   
-   bool result = p_coreinfo->current->savestate_support_level >= CORE_INFO_SAVESTATE_BASIC;
-   RARCH_LOG("[Fantasy Debug] Final result: %s\n", result ? "SUPPORTED" : "NOT SUPPORTED");
-   RARCH_LOG("[Fantasy Debug] ================================\n");
-   
-   return result;
+   return p_coreinfo->current->savestate_support_level >=
+         CORE_INFO_SAVESTATE_BASIC;
 }
 
 bool core_info_current_supports_rewind(void)

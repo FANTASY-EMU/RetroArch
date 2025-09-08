@@ -46,7 +46,7 @@
 
 #include "../common/vulkan_common.h"
 #if defined(HAVE_COCOATOUCH) || defined(TARGET_OS_TV)
-#include "../../../PocketRACore/Core/vulkan_ios_tvos_helpers.h"
+#include "../../../PVRetroArchCore/Core/vulkan_ios_tvos_helpers.h"
 #endif
 
 #include "../../configuration.h"
@@ -93,7 +93,7 @@ void vulkan_log_textures(void)
    unsigned i;
    for (i = 0; i < vk_count; i++)
    {
-      RARCH_WARN("[Vulkan]: Found leaked texture %llu.\n",
+      RARCH_WARN("[Vulkan] Found leaked texture %llu.\n",
             (unsigned long long)vk_images[i]);
    }
    vk_count = 0;
@@ -103,7 +103,7 @@ void vulkan_log_textures(void)
 static void vulkan_track_alloc(VkImage image)
 {
    vk_images[vk_count++] = image;
-   RARCH_LOG("[Vulkan]: Alloc %llu (%u).\n",
+   RARCH_DBG("[Vulkan] Alloc %llu (%u).\n",
          (unsigned long long)image, track_seq);
    track_seq++;
 }
@@ -453,7 +453,7 @@ static struct vk_texture vulkan_create_texture(vk_t *vk,
       if ((format_properties.linearTilingFeatures & required) != required)
       {
 #ifdef VULKAN_DEBUG
-         RARCH_DBG("[Vulkan]: GPU does not support using linear images as textures. Falling back to copy path.\n");
+         RARCH_DBG("[Vulkan] GPU does not support using linear images as textures. Falling back to copy path.\n");
 #endif
          type = VULKAN_TEXTURE_STAGING;
       }
@@ -564,7 +564,7 @@ static struct vk_texture vulkan_create_texture(vk_t *vk,
          {
             /* Recreate texture but for STAGING this time ... */
 #ifdef VULKAN_DEBUG
-            RARCH_DBG("[Vulkan]: GPU supports linear images as textures, but not DEVICE_LOCAL. Falling back to copy path.\n");
+            RARCH_DBG("[Vulkan] GPU supports linear images as textures, but not DEVICE_LOCAL. Falling back to copy path.\n");
 #endif
             type                  = VULKAN_TEXTURE_STAGING;
             vkDestroyImage(device, tex.image, NULL);
@@ -2860,6 +2860,9 @@ static bool vulkan_init_default_filter_chain(vk_t *vk)
    if (!vk->context)
       return false;
 
+   if (vk->filter_chain_default)
+      return true;
+
    info.device                = vk->context->device;
    info.gpu                   = vk->context->gpu;
    info.memory_properties     = &vk->context->memory_properties;
@@ -2875,15 +2878,15 @@ static bool vulkan_init_default_filter_chain(vk_t *vk)
    info.swapchain.render_pass = vk->render_pass;
    info.swapchain.num_indices = vk->context->num_swapchain_images;
 
-   vk->filter_chain           = vulkan_filter_chain_create_default(
+   vk->filter_chain_default   = vulkan_filter_chain_create_default(
          &info,
          vk->video.smooth
          ? GLSLANG_FILTER_CHAIN_LINEAR
          : GLSLANG_FILTER_CHAIN_NEAREST);
 
-   if (!vk->filter_chain)
+   if (!vk->filter_chain_default)
    {
-      RARCH_ERR("Failed to create filter chain.\n");
+      RARCH_ERR("[Vulkan] Failed to create default filter chain.\n");
       return false;
    }
 
@@ -2891,11 +2894,11 @@ static bool vulkan_init_default_filter_chain(vk_t *vk)
    if (vk->context->flags & VK_CTX_FLAG_HDR_ENABLE)
    {
       struct video_shader* shader_preset = vulkan_filter_chain_get_preset(
-      vk->filter_chain);
+      vk->filter_chain_default);
       VkFormat rt_format = (shader_preset && shader_preset->passes)
-         ? vulkan_filter_chain_get_pass_rt_format(vk->filter_chain, shader_preset->passes - 1)
+         ? vulkan_filter_chain_get_pass_rt_format(vk->filter_chain_default, shader_preset->passes - 1)
          : VK_FORMAT_UNDEFINED;
-      bool emits_hdr10 = shader_preset && shader_preset->passes && vulkan_filter_chain_emits_hdr10(vk->filter_chain);
+      bool emits_hdr10 = shader_preset && shader_preset->passes && vulkan_filter_chain_emits_hdr10(vk->filter_chain_default);
 
       if (vulkan_is_hdr10_format(rt_format))
       {
@@ -2932,6 +2935,9 @@ static bool vulkan_init_filter_chain_preset(vk_t *vk, const char *shader_path)
 {
    struct vulkan_filter_chain_create_info info;
 
+   if (!vk->context)
+      return false;
+
    info.device                = vk->context->device;
    info.gpu                   = vk->context->gpu;
    info.memory_properties     = &vk->context->memory_properties;
@@ -2955,7 +2961,7 @@ static bool vulkan_init_filter_chain_preset(vk_t *vk, const char *shader_path)
 
    if (!vk->filter_chain)
    {
-      RARCH_ERR("[Vulkan]: Failed to create preset: \"%s\".\n", shader_path);
+      RARCH_ERR("[Vulkan] Failed to create preset: \"%s\".\n", shader_path);
       return false;
    }
 
@@ -3006,13 +3012,13 @@ static bool vulkan_init_filter_chain(vk_t *vk)
 
    if (string_is_empty(shader_path))
    {
-      RARCH_LOG("[Vulkan]: Loading stock shader.\n");
+      RARCH_LOG("[Vulkan] Loading stock shader.\n");
       return vulkan_init_default_filter_chain(vk);
    }
 
    if (type != RARCH_SHADER_SLANG)
    {
-      RARCH_LOG("[Vulkan]: Only Slang shaders are supported, falling back to stock.\n");
+      RARCH_WARN("[Vulkan] Only Slang shaders are supported, falling back to stock.\n");
       return vulkan_init_default_filter_chain(vk);
    }
 
@@ -3136,6 +3142,9 @@ static void vulkan_free(void *data)
 
       if (vk->filter_chain)
          vulkan_filter_chain_free((vulkan_filter_chain_t*)vk->filter_chain);
+
+      if (vk->filter_chain_default)
+         vulkan_filter_chain_free((vulkan_filter_chain_t*)vk->filter_chain_default);
 
 #ifdef VULKAN_HDR_SWAPCHAIN
       if (vk->context->flags & VK_CTX_FLAG_HDR_SUPPORT)
@@ -3323,13 +3332,13 @@ static void vulkan_init_readback(vk_t *vk, bool video_gpu_record)
    if (!scaler_ctx_gen_filter(&vk->readback.scaler_bgr))
    {
       vk->flags &= ~VK_FLAG_READBACK_STREAMED;
-      RARCH_ERR("[Vulkan]: Failed to initialize scaler context.\n");
+      RARCH_ERR("[Vulkan] Failed to initialize scaler context.\n");
    }
 
    if (!scaler_ctx_gen_filter(&vk->readback.scaler_rgb))
    {
       vk->flags &= ~VK_FLAG_READBACK_STREAMED;
-      RARCH_ERR("[Vulkan]: Failed to initialize scaler context.\n");
+      RARCH_ERR("[Vulkan] Failed to initialize scaler context.\n");
    }
 }
 
@@ -3357,7 +3366,7 @@ static void *vulkan_init(const video_info_t *video,
    ctx_driver                         = vulkan_get_context(vk, settings);
    if (!ctx_driver)
    {
-      RARCH_ERR("[Vulkan]: Failed to get Vulkan context.\n");
+      RARCH_ERR("[Vulkan] Failed to get Vulkan context.\n");
       goto error;
    }
 
@@ -3373,7 +3382,7 @@ static void *vulkan_init(const video_info_t *video,
 
    video_context_driver_set((const gfx_ctx_driver_t*)ctx_driver);
 
-   RARCH_LOG("[Vulkan]: Found vulkan context: \"%s\".\n", ctx_driver->ident);
+   RARCH_DBG("[Vulkan] Found vulkan context: \"%s\".\n", ctx_driver->ident);
 
    if (vk->ctx_driver->get_video_size)
       vk->ctx_driver->get_video_size(vk->ctx_data,
@@ -3381,7 +3390,7 @@ static void *vulkan_init(const video_info_t *video,
 
    if (!video->fullscreen && !vk->ctx_driver->has_windowed)
    {
-      RARCH_DBG("[Vulkan]: Config requires windowed mode, but context driver does not support it. "
+      RARCH_DBG("[Vulkan] Config requires windowed mode, but context driver does not support it. "
                 "Forcing fullscreen for this session.\n");
       force_fullscreen = true;
    }
@@ -3391,7 +3400,7 @@ static void *vulkan_init(const video_info_t *video,
    mode_width                         = 0;
    mode_height                        = 0;
 
-   RARCH_LOG("[Vulkan]: Detecting screen resolution: %ux%u.\n", full_x, full_y);
+   RARCH_DBG("[Vulkan] Detecting screen resolution: %ux%u.\n", full_x, full_y);
    interval = video->vsync ? video->swap_interval : 0;
 
    if (ctx_driver->swap_interval)
@@ -3422,7 +3431,7 @@ static void *vulkan_init(const video_info_t *video,
          || !vk->ctx_driver->set_video_mode(vk->ctx_data,
             win_width, win_height, (video->fullscreen || force_fullscreen)))
    {
-      RARCH_ERR("[Vulkan]: Failed to set video mode.\n");
+      RARCH_ERR("[Vulkan] Failed to set video mode.\n");
       goto error;
    }
 
@@ -3441,11 +3450,11 @@ static void *vulkan_init(const video_info_t *video,
    vk->translate_x       = 0.0;
    vk->translate_y       = 0.0;
 
-   RARCH_LOG("[Vulkan]: Using resolution %ux%u.\n", temp_width, temp_height);
+   RARCH_LOG("[Vulkan] Using resolution %ux%u.\n", temp_width, temp_height);
 
    if (!vk->ctx_driver || !vk->ctx_driver->get_context_data)
    {
-      RARCH_ERR("[Vulkan]: Failed to get context data.\n");
+      RARCH_ERR("[Vulkan] Failed to get context data.\n");
       goto error;
    }
 
@@ -3466,7 +3475,7 @@ static void *vulkan_init(const video_info_t *video,
       vk->flags         |=  VK_FLAG_KEEP_ASPECT;
    else
       vk->flags         &= ~VK_FLAG_KEEP_ASPECT;
-   RARCH_LOG("[Vulkan]: Using %s format.\n", video->rgb32 ? "BGRA8888" : "RGB565");
+   RARCH_LOG("[Vulkan] Using %s format.\n", video->rgb32 ? "BGRA8888" : "RGB565");
 
    /* Set the viewport to fix recording, since it needs to know
     * the viewport sizes before we start running. */
@@ -3555,7 +3564,7 @@ static void *vulkan_init(const video_info_t *video,
 
    if (!vulkan_init_filter_chain(vk))
    {
-      RARCH_ERR("[Vulkan]: Failed to init filter chain.\n");
+      RARCH_ERR("[Vulkan] Failed to init filter chain.\n");
       goto error;
    }
 
@@ -3678,10 +3687,10 @@ static void vulkan_check_swapchain(vk_t *vk)
    filter_info.num_indices          = vk->context->num_swapchain_images;
    if (
        !vulkan_filter_chain_update_swapchain_info(
-          (vulkan_filter_chain_t*)vk->filter_chain,
+          (vk->filter_chain) ? vk->filter_chain : vk->filter_chain_default,
           &filter_info)
       )
-      RARCH_ERR("Failed to update filter chain info. This will probably lead to a crash ...\n");
+      RARCH_ERR("[Vulkan] Failed to update filter chain info.\n");
 }
 
 static void vulkan_set_nonblock_state(void *data, bool state,
@@ -3761,7 +3770,7 @@ static bool vulkan_set_shader(void *data,
 
    if (!string_is_empty(path) && type != RARCH_SHADER_SLANG)
    {
-      RARCH_WARN("[Vulkan]: Only Slang shaders are supported. Falling back to stock.\n");
+      RARCH_WARN("[Vulkan] Only Slang shaders are supported. Falling back to stock.\n");
       path = NULL;
    }
 
@@ -3773,7 +3782,7 @@ static bool vulkan_set_shader(void *data,
 
    if (!vulkan_init_filter_chain_preset(vk, path))
    {
-      RARCH_ERR("[Vulkan]: Failed to create filter chain: \"%s\". Falling back to stock.\n", path);
+      RARCH_ERR("[Vulkan] Failed to create filter chain: \"%s\". Falling back to stock.\n", path);
       vulkan_init_default_filter_chain(vk);
       return false;
    }
@@ -4396,6 +4405,7 @@ static bool vulkan_frame(void *data, const void *frame,
    VkCommandBufferBeginInfo begin_info;
    VkSemaphore signal_semaphores[2];
    vk_t *vk                                      = (vk_t*)data;
+   vulkan_filter_chain_t *filter_chain           = NULL;
    bool waits_for_semaphores                     = false;
    unsigned width                                = video_info->width;
    unsigned height                               = video_info->height;
@@ -4422,11 +4432,29 @@ static bool vulkan_frame(void *data, const void *frame,
    unsigned swapchain_index                      =
       vk->context->current_swapchain_index;
    bool overlay_behind_menu                      = video_info->overlay_behind_menu;
+   bool use_main_buffer                          = true;
+
+   /* Fast toggle shader filter chain logic */
+   filter_chain = vk->filter_chain;
+
+   if (!video_info->shader_active && vk->filter_chain != vk->filter_chain_default)
+   {
+      if (!vk->filter_chain_default)
+         vulkan_init_default_filter_chain(vk);
+
+      if (vk->filter_chain_default)
+         filter_chain = vk->filter_chain_default;
+      else
+         return false;
+   }
+
+   if (!filter_chain && vk->filter_chain_default)
+      filter_chain = vk->filter_chain_default;
 
 #ifdef VULKAN_HDR_SWAPCHAIN
-   bool use_main_buffer                          =
+   use_main_buffer                               =
          ( vk->context->flags & VK_CTX_FLAG_HDR_ENABLE)
-      && (!vk->filter_chain || !vulkan_filter_chain_emits_hdr10(vk->filter_chain));
+      && (!filter_chain || !vulkan_filter_chain_emits_hdr10(filter_chain));
 #endif /* VULKAN_HDR_SWAPCHAIN */
 
    /* Bookkeeping on start of frame. */
@@ -4547,9 +4575,9 @@ static bool vulkan_frame(void *data, const void *frame,
 
    /* Notify filter chain about the new sync index. */
    vulkan_filter_chain_notify_sync_index(
-         (vulkan_filter_chain_t*)vk->filter_chain, frame_index);
+         (vulkan_filter_chain_t*)filter_chain, frame_index);
    vulkan_filter_chain_set_frame_count(
-         (vulkan_filter_chain_t*)vk->filter_chain, frame_count);
+         (vulkan_filter_chain_t*)filter_chain, frame_count);
 
    /* Sub-frame info for multiframe shaders (per real content frame).
       Should always be 1 for non-use of subframes*/
@@ -4562,13 +4590,13 @@ static bool vulkan_frame(void *data, const void *frame,
            || (vk->context->swap_interval > 1)
            || (vk->flags & VK_FLAG_MENU_ENABLE))
         vulkan_filter_chain_set_shader_subframes(
-           (vulkan_filter_chain_t*)vk->filter_chain, 1);
+           (vulkan_filter_chain_t*)filter_chain, 1);
      else
         vulkan_filter_chain_set_shader_subframes(
-           (vulkan_filter_chain_t*)vk->filter_chain, video_info->shader_subframes);
+           (vulkan_filter_chain_t*)filter_chain, video_info->shader_subframes);
 
      vulkan_filter_chain_set_current_shader_subframe(
-           (vulkan_filter_chain_t*)vk->filter_chain, 1);
+           (vulkan_filter_chain_t*)filter_chain, 1);
    }
 
 #ifdef VULKAN_ROLLING_SCANLINE_SIMULATION
@@ -4582,32 +4610,32 @@ static bool vulkan_frame(void *data, const void *frame,
          &&  (!(vk->flags & VK_FLAG_MENU_ENABLE))
          &&  !(vk->context->swap_interval > 1))
       vulkan_filter_chain_set_simulate_scanline(
-            (vulkan_filter_chain_t*)vk->filter_chain, true);
+            (vulkan_filter_chain_t*)filter_chain, true);
    else
       vulkan_filter_chain_set_simulate_scanline(
-            (vulkan_filter_chain_t*)vk->filter_chain, false);
+            (vulkan_filter_chain_t*)filter_chain, false);
 #endif /* VULKAN_ROLLING_SCANLINE_SIMULATION */
 
 #ifdef HAVE_REWIND
    vulkan_filter_chain_set_frame_direction(
-         (vulkan_filter_chain_t*)vk->filter_chain,
+         (vulkan_filter_chain_t*)filter_chain,
          state_manager_frame_is_reversed() ? -1 : 1);
 #else
    vulkan_filter_chain_set_frame_direction(
-         (vulkan_filter_chain_t*)vk->filter_chain,
+         (vulkan_filter_chain_t*)filter_chain,
          1);
 #endif
    vulkan_filter_chain_set_frame_time_delta(
-         (vulkan_filter_chain_t*)vk->filter_chain, (uint32_t)video_driver_get_frame_time_delta_usec());
+         (vulkan_filter_chain_t*)filter_chain, (uint32_t)video_driver_get_frame_time_delta_usec());
 
    vulkan_filter_chain_set_original_fps(
-         (vulkan_filter_chain_t*)vk->filter_chain, video_driver_get_original_fps());
+         (vulkan_filter_chain_t*)filter_chain, video_driver_get_original_fps());
 
    vulkan_filter_chain_set_rotation(
-         (vulkan_filter_chain_t*)vk->filter_chain, retroarch_get_rotation());
+         (vulkan_filter_chain_t*)filter_chain, retroarch_get_rotation());
 
    vulkan_filter_chain_set_core_aspect(
-         (vulkan_filter_chain_t*)vk->filter_chain, video_driver_get_core_aspect());
+         (vulkan_filter_chain_t*)filter_chain, video_driver_get_core_aspect());
 
    /* OriginalAspectRotated: return 1/aspect for 90 and 270 rotated content */
    uint32_t rot = retroarch_get_rotation();
@@ -4615,7 +4643,7 @@ static bool vulkan_frame(void *data, const void *frame,
    if (rot == 1 || rot == 3)
       core_aspect_rot = 1/core_aspect_rot;
    vulkan_filter_chain_set_core_aspect_rot(
-         (vulkan_filter_chain_t*)vk->filter_chain, core_aspect_rot);
+         (vulkan_filter_chain_t*)filter_chain, core_aspect_rot);
 
    /* Render offscreen filter chain passes. */
    {
@@ -4679,13 +4707,13 @@ static bool vulkan_frame(void *data, const void *frame,
       }
 
       vulkan_filter_chain_set_input_texture((vulkan_filter_chain_t*)
-            vk->filter_chain, &input);
+            filter_chain, &input);
    }
 
    vulkan_set_viewport(vk, width, height, false, true);
 
    vulkan_filter_chain_build_offscreen_passes(
-         (vulkan_filter_chain_t*)vk->filter_chain,
+         (vulkan_filter_chain_t*)filter_chain,
          vk->cmd, &vk->vk_vp);
 
 #if defined(HAVE_MENU)
@@ -4743,7 +4771,7 @@ static bool vulkan_frame(void *data, const void *frame,
       vkCmdBeginRenderPass(vk->cmd, &rp_info, VK_SUBPASS_CONTENTS_INLINE);
 
       vulkan_filter_chain_build_viewport_pass(
-            (vulkan_filter_chain_t*)vk->filter_chain, vk->cmd,
+            (vulkan_filter_chain_t*)filter_chain, vk->cmd,
             &vk->vk_vp, vk->mvp.data);
 
 #ifdef HAVE_OVERLAY
@@ -4833,7 +4861,7 @@ static bool vulkan_frame(void *data, const void *frame,
    /* End the filter chain frame.
     * This must happen outside a render pass.
     */
-   vulkan_filter_chain_end_frame((vulkan_filter_chain_t*)vk->filter_chain, vk->cmd);
+   vulkan_filter_chain_end_frame((vulkan_filter_chain_t*)filter_chain, vk->cmd);
 
    if (
             (backbuffer->image != VK_NULL_HANDLE)
@@ -5146,9 +5174,9 @@ static bool vulkan_frame(void *data, const void *frame,
       for (j = 1; j < (int) video_info->shader_subframes; j++)
       {
          vulkan_filter_chain_set_shader_subframes(
-               (vulkan_filter_chain_t*)vk->filter_chain, video_info->shader_subframes);
+               (vulkan_filter_chain_t*)filter_chain, video_info->shader_subframes);
          vulkan_filter_chain_set_current_shader_subframe(
-               (vulkan_filter_chain_t*)vk->filter_chain, j+1);
+               (vulkan_filter_chain_t*)filter_chain, j+1);
          if (!vulkan_frame(vk, NULL, 0, 0, frame_count, 0, msg,
                   video_info))
          {
@@ -5497,6 +5525,7 @@ static uint32_t vulkan_get_flags(void *data)
    BIT32_SET(flags, GFX_CTX_FLAGS_SCREENSHOTS_SUPPORTED);
    BIT32_SET(flags, GFX_CTX_FLAGS_OVERLAY_BEHIND_MENU_SUPPORTED);
    BIT32_SET(flags, GFX_CTX_FLAGS_SUBFRAME_SHADERS);
+   BIT32_SET(flags, GFX_CTX_FLAGS_FAST_TOGGLE_SHADERS);
 
    return flags;
 }
@@ -5620,7 +5649,7 @@ static bool vulkan_read_viewport(void *data, uint8_t *buffer, bool is_idle)
             break;
 
          default:
-            RARCH_ERR("[Vulkan]: Unexpected swapchain format. Cannot readback.\n");
+            RARCH_ERR("[Vulkan] Unexpected swapchain format. Cannot readback.\n");
             break;
       }
 
@@ -5665,7 +5694,9 @@ static bool vulkan_read_viewport(void *data, uint8_t *buffer, bool is_idle)
 
       if (!staging->memory)
       {
-         RARCH_ERR("[Vulkan]: Attempted to readback synchronously, but no image is present.\nThis can happen if vsync is disabled on Windows systems due to mailbox emulation.\n");
+         RARCH_ERR(
+               "[Vulkan] Attempted to readback synchronously, but no image is present.\n"
+               "[Vulkan] This can happen if vsync is disabled on Windows systems due to mailbox emulation.\n");
          return false;
       }
 
@@ -5718,7 +5749,7 @@ static bool vulkan_read_viewport(void *data, uint8_t *buffer, bool is_idle)
                break;
 
             default:
-               RARCH_ERR("[Vulkan]: Unexpected swapchain format.\n");
+               RARCH_ERR("[Vulkan] Unexpected swapchain format.\n");
                break;
          }
       }
