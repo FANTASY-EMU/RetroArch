@@ -3773,7 +3773,13 @@ void video_driver_frame(const void *data, unsigned width,
           * overflow. If a 'runaway' accumulator
           * is detected, we simply reset it */
          if (frame_time_accumulator > frame_time_target)
+         {
+            /* 🔍 追踪累加器重置 */
+//            RARCH_WARN("[速度测试-累加器] 累加器溢出重置！累加值=%u us (%.2f ms), 目标=%u us (%.2f ms)\n",
+//                       frame_time_accumulator, (double)frame_time_accumulator / 1000.0,
+//                       frame_time_target, (double)frame_time_target / 1000.0);
             frame_time_accumulator = 0;
+         }
       }
    }
    else
@@ -4230,6 +4236,9 @@ void video_driver_frame(const void *data, unsigned width,
          && video_st->current_video
          && video_st->current_video->frame)
    {
+      /* 🔍 测量视频帧提交时间（包含VSync等待） */
+      retro_time_t video_frame_start = cpu_features_get_time_usec();
+      
       video_info.current_subframe = 0;
       if (video_st->current_video->frame(
                video_st->data, data, width, height,
@@ -4246,6 +4255,43 @@ void video_driver_frame(const void *data, unsigned width,
          video_st->flags |=  VIDEO_FLAG_ACTIVE;
       else
          video_st->flags &= ~VIDEO_FLAG_ACTIVE;
+      
+      /* 🔍 检测视频帧提交延迟 */
+      retro_time_t video_frame_time = (cpu_features_get_time_usec() - video_frame_start) / 1000;
+      
+      /* 统计视频帧提交时间 */
+      static int video_frame_counter = 0;
+      static retro_time_t video_time_sum = 0;
+      static retro_time_t video_time_max = 0;
+      static int video_long_frame_count = 0; /* >10ms */
+      
+      video_time_sum += video_frame_time;
+      if (video_frame_time > video_time_max) video_time_max = video_frame_time;
+      if (video_frame_time > 10) {
+         video_long_frame_count++;
+         /* 立即报告长渲染帧 */
+         if (video_frame_time > 20) {
+            RARCH_WARN("[速度测试-视频渲染] 视频帧提交耗时 %.2f ms (可能VSync等待或GPU繁忙)\n",
+                       (double)video_frame_time);
+         }
+      }
+      
+      video_frame_counter++;
+      if (video_frame_counter >= 60) {
+         uint32_t runloop_flags = runloop_get_flags();
+         bool is_fastmotion = (runloop_flags & RUNLOOP_FLAG_FASTMOTION) ? true : false;
+         const char *speed_mode = is_fastmotion ? "加速" : "常速";
+         
+         RARCH_LOG("[速度测试-视频渲染-%s] 60帧统计 - 平均=%.2f ms, 最大=%.2f ms, 长渲染=%d次 (>10ms)\n",
+                   speed_mode,
+                   (double)video_time_sum / 60.0,
+                   (double)video_time_max,
+                   video_long_frame_count);
+         video_frame_counter = 0;
+         video_time_sum = 0;
+         video_time_max = 0;
+         video_long_frame_count = 0;
+      }
    }
 
    video_st->frame_count++;

@@ -7739,7 +7739,50 @@ void core_run(void)
    else if (late_polling)
       current_core->flags &= ~RETRO_CORE_FLAG_INPUT_POLLED;
 
+   /* 🔍 方案1：测量核心帧执行时间 */
+   retro_time_t frame_start_time = cpu_features_get_time_usec();
+   
    current_core->retro_run();
+   
+   /* 🔍 方案1：立即测量帧执行时间 */
+   retro_time_t frame_end_time = cpu_features_get_time_usec();
+   retro_time_t frame_exec_time_us = frame_end_time - frame_start_time;
+   retro_time_t frame_exec_time_ms = frame_exec_time_us / 1000;
+   
+   /* 🔍 方案4：慢帧统计 */
+   static int slow_frame_count = 0;
+   static retro_time_t slowest_frame = 0;
+   static int total_frame_counter = 0;
+   
+   /* 检测异常慢的帧（>10ms） */
+   if (frame_exec_time_ms > 10) {
+      slow_frame_count++;
+      if (frame_exec_time_ms > slowest_frame)
+         slowest_frame = frame_exec_time_ms;
+      
+      /* 立即报告特别慢的帧（>20ms） */
+      if (frame_exec_time_ms > 20) {
+         RARCH_WARN("[速度测试-慢帧] 检测到异常慢帧！执行时间 %.2f ms (目标 %.2f ms)\n",
+                    (double)frame_exec_time_ms,
+                    (double)(runloop_st->frame_limit_minimum_time / 1000.0));
+      }
+   }
+   
+   /* 每60帧统计一次（常速和加速都统计） */
+   total_frame_counter++;
+   if (total_frame_counter >= 60) {
+      bool is_fastmotion = (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION) ? true : false;
+      const char *speed_mode = is_fastmotion ? "加速" : "常速";
+      
+      RARCH_LOG("[速度测试-慢帧统计-%s] 60帧统计 - 慢帧=%d次 (>10ms), 最慢=%.2f ms, 平均执行时间=%.2f ms\n",
+                speed_mode,
+                slow_frame_count, 
+                (double)slowest_frame,
+                (double)(runloop_st->core_run_time / 60.0));
+      slow_frame_count = 0;
+      slowest_frame = 0;
+      total_frame_counter = 0;
+   }
 
 #ifdef HAVE_GAME_AI
    {

@@ -556,8 +556,50 @@ static void audio_driver_flush(
          output_frames       *= sizeof(int16_t);  /* Unit: bytes */
       }
 
+      /* 🔍 方案2：测量音频写入时间 */
+      retro_time_t audio_start_time = cpu_features_get_time_usec();
+      
       audio_st->current_audio->write(audio_st->context_audio_data,
             output_data, output_frames * 2);
+      
+      /* 🔍 方案2：详细的音频写入统计 */
+      retro_time_t audio_write_time = (cpu_features_get_time_usec() - audio_start_time) / 1000;
+      
+      /* 立即报告阻塞 */
+      if (audio_write_time > 5) {
+         RARCH_WARN("[速度测试-音频阻塞] 音频写入耗时 %.2f ms (数据量=%u bytes)\n",
+                    (double)audio_write_time, output_frames * 2);
+      }
+      
+      /* 统计音频写入时间分布 */
+      static int audio_write_counter = 0;
+      static retro_time_t audio_time_sum = 0;
+      static retro_time_t audio_time_max = 0;
+      static retro_time_t audio_time_min = 999999;
+      static int audio_block_count = 0;  /* >5ms */
+      static int audio_long_block_count = 0;  /* >10ms */
+      
+      audio_time_sum += audio_write_time;
+      if (audio_write_time > audio_time_max) audio_time_max = audio_write_time;
+      if (audio_write_time < audio_time_min) audio_time_min = audio_write_time;
+      if (audio_write_time > 5) audio_block_count++;
+      if (audio_write_time > 10) audio_long_block_count++;
+      
+      audio_write_counter++;
+      if (audio_write_counter >= 60) {
+//         RARCH_LOG("[速度测试-音频统计] 60次写入 - 平均=%.2f ms, 最大=%.2f ms, 最小=%.2f ms, 阻塞=%d次 (>5ms), 长阻塞=%d次 (>10ms)\n",
+//                   (double)audio_time_sum / 60.0,
+//                   (double)audio_time_max,
+//                   (double)audio_time_min,
+//                   audio_block_count,
+//                   audio_long_block_count);
+         audio_write_counter = 0;
+         audio_time_sum = 0;
+         audio_time_max = 0;
+         audio_time_min = 999999;
+         audio_block_count = 0;
+         audio_long_block_count = 0;
+      }
    }
 }
 
@@ -829,12 +871,24 @@ void audio_driver_sample(int16_t left, int16_t right)
    if (!(    (runloop_flags   & RUNLOOP_FLAG_PAUSED)
          || !(audio_st->flags & AUDIO_FLAG_ACTIVE)
          || !(audio_st->output_samples_buf)))
+   {
+      /* 🔍 方案2：测量音频flush时间 */
+      retro_time_t flush_start_time = cpu_features_get_time_usec();
+      
       audio_driver_flush(audio_st,
             config_get_ptr()->floats.slowmotion_ratio,
             audio_st->output_samples_conv_buf,
             audio_st->data_ptr,
             (runloop_flags & RUNLOOP_FLAG_SLOWMOTION) ? true : false,
             (runloop_flags & RUNLOOP_FLAG_FASTMOTION) ? true : false);
+      
+      /* 🔍 方案2：检测flush阻塞 */
+      retro_time_t flush_time = (cpu_features_get_time_usec() - flush_start_time) / 1000;
+      if (flush_time > 5) {
+         RARCH_WARN("[速度测试-音频阻塞] audio_flush耗时 %.2f ms (数据量=%zu samples)\n",
+                    (double)flush_time, audio_st->data_ptr);
+      }
+   }
 
    audio_st->data_ptr = 0;
 }
@@ -878,12 +932,24 @@ size_t audio_driver_sample_batch(const int16_t *data, size_t frames)
       if (!(    (runloop_flags & RUNLOOP_FLAG_PAUSED)
             || !(audio_st->flags & AUDIO_FLAG_ACTIVE)
             || !(audio_st->output_samples_buf)))
+      {
+         /* 🔍 方案2：测量批量音频flush时间 */
+         retro_time_t batch_flush_start = cpu_features_get_time_usec();
+         
          audio_driver_flush(audio_st,
                config_get_ptr()->floats.slowmotion_ratio,
                data,
                frames_to_write << 1,
                (runloop_flags & RUNLOOP_FLAG_SLOWMOTION) ? true : false,
                (runloop_flags & RUNLOOP_FLAG_FASTMOTION) ? true : false);
+         
+         /* 🔍 方案2：检测批量flush阻塞 */
+         retro_time_t batch_flush_time = (cpu_features_get_time_usec() - batch_flush_start) / 1000;
+         if (batch_flush_time > 5) {
+            RARCH_WARN("[速度测试-音频阻塞] audio_batch_flush耗时 %.2f ms (帧数=%zu)\n",
+                       (double)batch_flush_time, frames_to_write);
+         }
+      }
 
       frames_remaining -= frames_to_write;
       data             += frames_to_write << 1;
