@@ -42,7 +42,7 @@
 
 #if defined(OSX)
 #include "../ui/drivers/ui_cocoa.m"
-#else
+#elif !JOYENGINE_V2
 #include "../ui/drivers/ui_cocoatouch.m"
 #endif
 
@@ -52,6 +52,11 @@
 
 #ifdef HAVE_MFI
 #include "../input/drivers_joypad/mfi_joypad.m"
+#endif
+#if JOYENGINE_V2
+#include "../input/drivers_joypad/je_joypad_stub.m"
+#else
+#include "../input/drivers_joypad/joyemu_joypad.m"
 #endif
 
 #if defined(__APPLE__) && defined(__MACH__)

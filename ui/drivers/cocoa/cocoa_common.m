@@ -24,8 +24,10 @@
 #include "RetroArchPlaylistManager.h"
 
 #ifdef HAVE_COCOATOUCH
+#ifndef NO_GCDWEB
 #import "../../../pkg/apple/WebServer/GCDWebUploader/GCDWebUploader.h"
 #import "WebServer.h"
+#endif
 #if TARGET_OS_TV
 #import <TVServices/TVServices.h>
 #import "../../pkg/apple/RetroArchTopShelfExtension/ContentProvider.h"
@@ -87,7 +89,11 @@ static CocoaView* g_instance;
 void *glkitview_init(void);
 void cocoa_file_load_with_detect_core(const char *filename);
 
+#ifndef NO_GCDWEB
 @interface CocoaView()<GCDWebUploaderDelegate, UIGestureRecognizerDelegate
+#else
+@interface CocoaView()<UIGestureRecognizerDelegate
+#endif
 #if TARGET_OS_IOS
 ,UIDocumentPickerDelegate
 #endif
@@ -95,6 +101,7 @@ void cocoa_file_load_with_detect_core(const char *filename);
 @end
 #endif
 
+#if !(defined(JOYENGINE_V2) && JOYENGINE_V2)
 static CFRunLoopObserverRef iterate_observer;
 
 static void rarch_draw_observer(CFRunLoopObserverRef observer,
@@ -152,6 +159,7 @@ void rarch_stop_draw_observer(void)
     CFRelease(iterate_observer);
     iterate_observer = NULL;
 }
+#endif
 
 @implementation CocoaView
 
@@ -752,12 +760,13 @@ void rarch_stop_draw_observer(void)
 -(void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
-#if !TARGET_OS_SIMULATOR
+#if !TARGET_OS_SIMULATOR && !defined(NO_GCDWEB)
     [[WebServer sharedInstance] startServers];
     [WebServer sharedInstance].webUploader.delegate = self;
 #endif
 }
 
+#ifndef NO_GCDWEB
 #pragma mark GCDWebServerDelegate
 - (void)webServerDidCompleteBonjourRegistration:(GCDWebServer*)server
 {
@@ -803,6 +812,7 @@ void rarch_stop_draw_observer(void)
     });
 #endif
 }
+#endif
 
 #endif
 

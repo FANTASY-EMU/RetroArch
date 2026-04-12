@@ -1224,6 +1224,11 @@ extern input_device_driver_t hid_joypad;
 extern input_device_driver_t android_joypad;
 extern input_device_driver_t qnx_joypad;
 extern input_device_driver_t mfi_joypad;
+#if JOYENGINE_V2
+extern input_device_driver_t joyengine_joypad;
+#else
+extern input_device_driver_t joyemu_joypad;
+#endif
 extern input_device_driver_t dos_joypad;
 extern input_device_driver_t rwebpad_joypad;
 extern input_device_driver_t test_joypad;

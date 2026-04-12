@@ -37,6 +37,8 @@ extern void osx_show_file_sheet(void);
 #import <MetalKit/MetalKit.h>
 #endif
 
+typedef struct gfx_ctx_mode gfx_ctx_mode_t;
+
 typedef enum apple_view_type
 {
    APPLE_VIEW_TYPE_NONE = 0,
