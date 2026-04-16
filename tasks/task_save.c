@@ -1499,6 +1499,13 @@ static bool task_save_state_finder(retro_task_t *task, void *user_data)
    return (task && task->handler == task_save_handler);
 }
 
+bool joyemu_state_task_should_remain_in_progress(
+      bool has_visible_task_match,
+      bool matching_transfer_in_progress)
+{
+   return has_visible_task_match || matching_transfer_in_progress;
+}
+
 /* Returns true if a save state task is in progress */
 static bool content_save_state_in_progress(void* data)
 {
@@ -1507,7 +1514,9 @@ static bool content_save_state_in_progress(void* data)
    find_data.func     = task_save_state_finder;
    find_data.userdata = data;
 
-   return task_queue_find(&find_data);
+   return joyemu_state_task_should_remain_in_progress(
+         task_queue_find_including_finished(&find_data),
+         task_queue_blocking_task_in_transfer());
 }
 
 void content_wait_for_save_state_task(void)
@@ -1529,7 +1538,9 @@ bool content_load_state_in_progress(void* data)
    find_data.func     = task_load_state_finder;
    find_data.userdata = data;
 
-   return task_queue_find(&find_data);
+   return joyemu_state_task_should_remain_in_progress(
+         task_queue_find_including_finished(&find_data),
+         task_queue_blocking_task_in_transfer());
 }
 
 void content_wait_for_load_state_task(void)

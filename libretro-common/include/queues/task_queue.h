@@ -561,6 +561,28 @@ bool task_queue_is_threaded(void);
 bool task_queue_find(task_finder_data_t *find_data);
 
 /**
+ * Like \c task_queue_find, but also searches tasks that have already left the
+ * running queue and are waiting in the finished queue for callback/cleanup.
+ *
+ * @param find_data Parameters for the search.
+ * Behavior is undefined if \c NULL.
+ * @return \c true if \c find_data::func returned \c true for any running or
+ * callback-pending task.
+ */
+bool task_queue_find_including_finished(task_finder_data_t *find_data);
+
+/**
+ * Returns whether any blocking task is currently moving from the running queue
+ * to the finished queue.
+ *
+ * This covers the brief transfer window where a task is no longer visible in
+ * either queue but its callback has not yet had a chance to run.
+ *
+ * @return \c true if a blocking task is in the transfer window.
+ */
+bool task_queue_blocking_task_in_transfer(void);
+
+/**
  * Retrieves arbitrary data from every task
  * whose handler matches \c data::handler.
  *
