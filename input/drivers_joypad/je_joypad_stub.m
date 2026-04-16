@@ -119,6 +119,10 @@ static int16_t je_joypad_state(
    if (port_idx >= JE_MAX_PLAYERS)
       return 0;
 
+   /* JoyEngine writes JE input state in RetroArch's logical button order.
+    * Keep RA bind/autoconfig gating intact here so frontend remaps and
+    * auto-binds still decide which logical inputs are considered active,
+    * instead of blindly mirroring every bit in je_input_state. */
    for (i = 0; i < RARCH_FIRST_CUSTOM_BIND; i++)
    {
       const uint64_t joykey  = (binds[i].joykey != NO_BTN)
