@@ -775,7 +775,9 @@ font_renderer_t metal_raster_font = {
       _layer                        = (CAMetalLayer *)view.layer;
 
       if (![self _initMetal])
+      {
          return nil;
+      }
 
       _video                        = *video;
       _viewport                     = (video_viewport_t *)calloc(1, sizeof(video_viewport_t));
@@ -849,6 +851,15 @@ font_renderer_t metal_raster_font = {
 - (bool)_initMetal
 {
    _library = [_device newDefaultLibrary];
+
+   if (!_library)
+   {
+      NSBundle *b = [NSBundle bundleForClass:[(id)apple_platform class]];
+      NSError *bundleErr = nil;
+      id<MTLLibrary> fallbackLib = b ? [_device newDefaultLibraryWithBundle:b error:&bundleErr] : nil;
+      _library = fallbackLib;
+   }
+
    _context = [[Context alloc] initWithDevice:_device
                                         layer:_layer
                                       library:_library];
@@ -879,7 +890,6 @@ font_renderer_t metal_raster_font = {
       psd.vertexDescriptor           = vd;
       psd.vertexFunction             = [_library newFunctionWithName:@"basic_vertex_proj_tex"];
       psd.fragmentFunction           = [_library newFunctionWithName:@"basic_fragment_proj_tex"];
-
 
       _t_pipelineState = [_device newRenderPipelineStateWithDescriptor:psd error:&err];
       if (err != nil)

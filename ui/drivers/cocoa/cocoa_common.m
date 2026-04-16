@@ -174,29 +174,21 @@ void rarch_stop_draw_observer(void)
 -(void)step:(CADisplayLink*)target API_AVAILABLE(macos(14.0), ios(3.1), tvos(3.1))
 {
 #if defined(IOS)
+   /* JoyEngine v2 uses JEPlatformDriver's CFRunLoopObserver as the single
+    * emulation tick source. Keep CADisplayLink as a lightweight wake source. */
+   extern bool rarch_draw_observer_is_active(void);
+
+   (void)target;
+
    if ([[UIApplication sharedApplication] applicationState] != UIApplicationStateActive)
       return;
 
-   int ret = runloop_iterate();
-
-   task_queue_check();
-
-   if (ret == -1)
-   {
-      main_exit(NULL);
-      exit(0);
+   if (!rarch_draw_observer_is_active())
       return;
-   }
 
-#if !TARGET_OS_TV
    uint32_t runloop_flags = runloop_get_flags();
-   if (runloop_flags & RUNLOOP_FLAG_FASTMOTION)
-   {
-      /* Fast-forward: observer handles all iterations */
-      rarch_start_draw_observer();
+   if (!(runloop_flags & RUNLOOP_FLAG_IDLE))
       CFRunLoopWakeUp(CFRunLoopGetMain());
-   }
-#endif
 #endif
 }
 #endif
@@ -212,19 +204,11 @@ void rarch_stop_draw_observer(void)
       view.displayLink = [CADisplayLink displayLinkWithTarget:view selector:@selector(step:)];
 #if __IPHONE_OS_VERSION_MAX_ALLOWED >= 150000 || __TV_OS_VERSION_MAX_ALLOWED >= 150000
       if (@available(iOS 15.0, tvOS 15.0, *))
-      {
-         /* Use a wide range by default to support ProMotion displays,
-          * the display server will set the exact rate when needed */
-         [view.displayLink setPreferredFrameRateRange:CAFrameRateRangeMake(60, 120, 120)];
-      }
+         [view.displayLink setPreferredFrameRateRange:CAFrameRateRangeMake(60, 60, 60)];
       else
-      {
-         /* iOS 9-14: Use preferredFramesPerSecond as fallback */
-         view.displayLink.preferredFramesPerSecond = 120;
-      }
+         view.displayLink.preferredFramesPerSecond = 60;
 #else
-      /* Building with SDK < iOS 15: Use preferredFramesPerSecond */
-      view.displayLink.preferredFramesPerSecond = 120;
+      view.displayLink.preferredFramesPerSecond = 60;
 #endif
       [view.displayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
 #elif defined(OSX) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
