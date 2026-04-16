@@ -422,45 +422,24 @@ void set_melonds_custom_layout(const char *layout)
 
 void set_desmume_custom_layout(const char *layout)
 {
-   double top_x_f = 0.0;
-   double top_y_f = 0.0;
-   double top_w_f = 0.0;
-   double top_h_f = 0.0;
-   double bot_x_f = 0.0;
-   double bot_y_f = 0.0;
-   double bot_w_f = 0.0;
-   double bot_h_f = 0.0;
-   double buf_w_f = 0.0;
-   double buf_h_f = 0.0;
-
    joyemu_replace_string(&g_desmume_custom_layout, layout);
-   g_ds_layout_valid = false;
 
-   if (!layout)
-      return;
+   /* g_ds_layout_valid is intentionally NOT set here.
+    * This disables the host-level frame transform (video_driver.c) and
+    * pointer remap (input_driver.c). The layout is now handled entirely
+    * inside the DeSmuME core via desmume_custom_layout_config → LAYOUT_CUSTOM,
+    * mirroring how MelonDS processes melonds_custom_layout_config.
+    *
+    * Ported from Skin-ODR commit 4cf82b3a9 ("替换DeSmuME核心framework") to
+    * match the new DeSmuME framework binary shipped at
+    * Cores/desmume.libretro.framework. Without this, the stale host-side
+    * parse would keep g_ds_layout_valid=true and produce double transforms
+    * when the new core also processes the layout option. */
 
-   if (sscanf(layout, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf",
-            &top_x_f, &top_y_f, &top_w_f, &top_h_f,
-            &bot_x_f, &bot_y_f, &bot_w_f, &bot_h_f,
-            &buf_w_f, &buf_h_f) != 10)
-      return;
-
-   g_ds_top_x = (int)lround(top_x_f);
-   g_ds_top_y = (int)lround(top_y_f);
-   g_ds_top_w = (int)lround(top_w_f);
-   g_ds_top_h = (int)lround(top_h_f);
-   g_ds_bot_x = (int)lround(bot_x_f);
-   g_ds_bot_y = (int)lround(bot_y_f);
-   g_ds_bot_w = (int)lround(bot_w_f);
-   g_ds_bot_h = (int)lround(bot_h_f);
-   g_ds_buf_w = (int)lround(buf_w_f);
-   g_ds_buf_h = (int)lround(buf_h_f);
-
-   if (g_ds_top_w <= 0 || g_ds_top_h <= 0 || g_ds_bot_w <= 0
-         || g_ds_bot_h <= 0 || g_ds_buf_w <= 0 || g_ds_buf_h <= 0)
-      return;
-
-   g_ds_layout_valid = true;
+   if (layout)
+      RARCH_LOG("[JoyEMU-DeSmuME] Stored custom layout for core: %s\n", layout);
+   else
+      RARCH_LOG("[JoyEMU-DeSmuME] Cleared custom layout.\n");
 }
 
 void set_desmume_core_active(bool active)
