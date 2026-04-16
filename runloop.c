@@ -1680,6 +1680,13 @@ bool runloop_environment_cb(unsigned cmd, void *data)
 #endif
             runloop_st->core_options->updated = false;
 
+            if (g_desmume_custom_layout && string_is_equal(var->key, "desmume_custom_layout_config"))
+            {
+               var->value = g_desmume_custom_layout;
+               RARCH_LOG("[JoyEMU-DeSmuME] GET_VARIABLE override: desmume_custom_layout_config = %s\n", var->value);
+               break;
+            }
+
             if (core_option_manager_get_idx(runloop_st->core_options,
                   var->key, &opt_idx))
                var->value = core_option_manager_get_val(
@@ -5669,6 +5676,11 @@ void runloop_msg_queue_push(
       enum message_queue_icon icon,
       enum message_queue_category category)
 {
+   if (!joyemu_runloop_should_display_core_message_on_osd(0))
+   {
+      RARCH_LOG("[JoyEMU OSD suppressed]: %s\n", msg ? msg : "(null)");
+      return;
+   }
 #if defined(HAVE_GFX_WIDGETS)
    dispgfx_widget_t *p_dispwidget = dispwidget_get_ptr();
    bool widgets_active            = p_dispwidget->active;
@@ -7212,7 +7224,8 @@ static enum runloop_state_enum runloop_check_state(
          }
          else
 #endif
-         if (dispwidget_get_ptr()->active)
+         if (dispwidget_get_ptr()->active
+               && joyemu_runloop_should_display_core_message_on_osd(0))
             gfx_widget_set_generic_message(msg, 1000);
          else
 #endif
@@ -7270,7 +7283,8 @@ static enum runloop_state_enum runloop_check_state(
             _len += strlcpy(msg + _len, " (Auto)", sizeof(msg) - _len);
 
 #ifdef HAVE_GFX_WIDGETS
-         if (dispwidget_get_ptr()->active)
+         if (dispwidget_get_ptr()->active
+               && joyemu_runloop_should_display_core_message_on_osd(0))
             gfx_widget_set_generic_message(msg, 1000);
          else
 #endif

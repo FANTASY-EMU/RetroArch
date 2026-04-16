@@ -50,6 +50,7 @@
 #include "gfx_widgets.h"
 #endif
 
+#include "../runloop_speed_test_debug.h"
 #include "video_shader_parse.h"
 
 #if defined(HAVE_SLANG) && defined(HAVE_SPIRV_CROSS)
@@ -3040,7 +3041,8 @@ bool video_shader_apply_shader(
             }
 
 #ifdef HAVE_GFX_WIDGETS
-            if (dispwidget_get_ptr()->active)
+            if (dispwidget_get_ptr()->active
+                  && joyemu_runloop_should_display_core_message_on_osd(0))
                gfx_widget_set_generic_message(msg, 2000);
             else
 #endif
