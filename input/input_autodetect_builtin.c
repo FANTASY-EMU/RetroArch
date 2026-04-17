@@ -778,5 +778,11 @@ const char* const input_builtin_autoconfs[] =
 #if HAVE_MFI
    DECL_AUTOCONF_DEVICE("mFi Controller", "mfi", MFI_DEFAULT_BINDS),
 #endif
+   /* JoyEngine is the JoyEMU-side joypad driver that reads je_input_state[].
+    * The button ordering in je_input_state matches MFI (same JEButton enum),
+    * so we reuse MFI_DEFAULT_BINDS. Missing this entry causes autoconfig
+    * to fail -> auto_binds stay at NO_BTN -> je_joypad_state returns 0,
+    * and skin/physical button presses never reach the core. */
+   DECL_AUTOCONF_DEVICE("JoyEngine Controller", "joyengine", MFI_DEFAULT_BINDS),
    NULL
 };
