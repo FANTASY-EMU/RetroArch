@@ -110,6 +110,7 @@
 
 #include "runtime_file.h"
 #include "runloop.h"
+#include "runloop_speed_test_debug.h"
 #include "camera/camera_driver.h"
 #include "location_driver.h"
 #include "record/record_driver.h"
@@ -243,6 +244,273 @@
 #if HAVE_GAME_AI
 #include "ai/game_ai.h"
 #endif
+
+#if DEBUG
+#define JE_SPEED_TEST_DEFAULT_TARGET_FRAME_MS (1000.0 / 60.0)
+#define JE_SPEED_TEST_LONG_FRAME_FACTOR 1.2
+#define JE_SPEED_TEST_SHORT_FRAME_FACTOR 0.8
+#define JE_SPEED_TEST_WARN_LONG_FACTOR 1.8
+#define JE_SPEED_TEST_WARN_SHORT_FACTOR 0.6
+
+static double je_speed_test_sanitize_target_frame_ms(double target_frame_ms)
+{
+   if (!isfinite(target_frame_ms) || target_frame_ms <= 0.0)
+      return JE_SPEED_TEST_DEFAULT_TARGET_FRAME_MS;
+
+   return target_frame_ms;
+}
+
+static double je_speed_test_long_frame_threshold_ms(double target_frame_ms)
+{
+   return je_speed_test_sanitize_target_frame_ms(target_frame_ms)
+      * JE_SPEED_TEST_LONG_FRAME_FACTOR;
+}
+
+static double je_speed_test_short_frame_threshold_ms(double target_frame_ms)
+{
+   return je_speed_test_sanitize_target_frame_ms(target_frame_ms)
+      * JE_SPEED_TEST_SHORT_FRAME_FACTOR;
+}
+
+static double je_speed_test_warn_long_frame_threshold_ms(double target_frame_ms)
+{
+   return je_speed_test_sanitize_target_frame_ms(target_frame_ms)
+      * JE_SPEED_TEST_WARN_LONG_FACTOR;
+}
+
+static double je_speed_test_warn_short_frame_threshold_ms(double target_frame_ms)
+{
+   return je_speed_test_sanitize_target_frame_ms(target_frame_ms)
+      * JE_SPEED_TEST_WARN_SHORT_FACTOR;
+}
+
+static bool jy_rotation_suppressed = false;
+
+bool je_speed_test_is_long_frame(double frame_delta_ms, double target_frame_ms)
+{
+   return frame_delta_ms > je_speed_test_long_frame_threshold_ms(target_frame_ms);
+}
+
+bool je_speed_test_is_short_frame(double frame_delta_ms, double target_frame_ms)
+{
+   return frame_delta_ms < je_speed_test_short_frame_threshold_ms(target_frame_ms);
+}
+
+bool je_speed_test_should_warn_long_frame(double frame_delta_ms, double target_frame_ms)
+{
+   return frame_delta_ms > je_speed_test_warn_long_frame_threshold_ms(target_frame_ms);
+}
+
+bool je_speed_test_should_warn_short_frame(double frame_delta_ms, double target_frame_ms)
+{
+   return frame_delta_ms < je_speed_test_warn_short_frame_threshold_ms(target_frame_ms);
+}
+
+bool je_speed_test_should_reset_window(bool runloop_paused, bool runloop_idle)
+{
+   return runloop_paused || runloop_idle;
+}
+
+bool joyemu_speed_test_should_reset_sampling_window(
+      bool runloop_paused,
+      bool runloop_idle,
+      bool fastmotion)
+{
+   return fastmotion || je_speed_test_should_reset_window(runloop_paused, runloop_idle);
+}
+
+je_speed_test_frame_stats_t je_speed_test_analyze_frame_deltas(
+      const double *samples,
+      size_t count,
+      double target_frame_ms)
+{
+   je_speed_test_frame_stats_t stats;
+   size_t i;
+
+   memset(&stats, 0, sizeof(stats));
+
+   if (!samples || count == 0)
+      return stats;
+
+   stats.min_ms = DBL_MAX;
+
+   for (i = 0; i < count; i++)
+   {
+      double frame_delta_ms = samples[i];
+
+      stats.average_ms += frame_delta_ms;
+
+      if (frame_delta_ms > stats.max_ms)
+         stats.max_ms = frame_delta_ms;
+      if (frame_delta_ms < stats.min_ms)
+         stats.min_ms = frame_delta_ms;
+      if (je_speed_test_is_long_frame(frame_delta_ms, target_frame_ms))
+         stats.long_frame_count++;
+      if (je_speed_test_is_short_frame(frame_delta_ms, target_frame_ms))
+         stats.short_frame_count++;
+   }
+
+   stats.average_ms /= (double)count;
+
+   if (stats.min_ms == DBL_MAX)
+      stats.min_ms = 0.0;
+
+   return stats;
+}
+
+void je_speed_test_reset(void)
+{
+}
+
+void je_speed_test_set_rotation_suppressed(bool suppressed)
+{
+   jy_rotation_suppressed = suppressed;
+   if (!suppressed)
+      je_speed_test_reset();
+}
+#endif
+
+bool joyemu_runloop_should_reset_frame_limit_timestamp_after_fastforward(
+      bool was_fastmotion,
+      bool is_fastmotion)
+{
+   return was_fastmotion && !is_fastmotion;
+}
+
+bool joyemu_runloop_should_log_core_message(unsigned target)
+{
+   (void)target;
+   return true;
+}
+
+bool joyemu_runloop_should_display_core_message_on_osd(unsigned target)
+{
+   (void)target;
+   return false;
+}
+
+static const char *g_melonds_custom_layout = NULL;
+static const char *g_desmume_custom_layout = NULL;
+static bool g_is_desmume_core_active       = false;
+static int g_ds_top_x                      = 0;
+static int g_ds_top_y                      = 0;
+static int g_ds_top_w                      = 0;
+static int g_ds_top_h                      = 0;
+static int g_ds_bot_x                      = 0;
+static int g_ds_bot_y                      = 0;
+static int g_ds_bot_w                      = 0;
+static int g_ds_bot_h                      = 0;
+static int g_ds_buf_w                      = 0;
+static int g_ds_buf_h                      = 0;
+static bool g_ds_layout_valid              = false;
+
+static void joyemu_replace_string(const char **dst, const char *value)
+{
+   if (*dst)
+   {
+      free((void*)*dst);
+      *dst = NULL;
+   }
+
+   if (value)
+      *dst = strdup(value);
+}
+
+void set_melonds_custom_layout(const char *layout)
+{
+   joyemu_replace_string(&g_melonds_custom_layout, layout);
+}
+
+void set_desmume_custom_layout(const char *layout)
+{
+   double top_x_f = 0.0;
+   double top_y_f = 0.0;
+   double top_w_f = 0.0;
+   double top_h_f = 0.0;
+   double bot_x_f = 0.0;
+   double bot_y_f = 0.0;
+   double bot_w_f = 0.0;
+   double bot_h_f = 0.0;
+   double buf_w_f = 0.0;
+   double buf_h_f = 0.0;
+
+   joyemu_replace_string(&g_desmume_custom_layout, layout);
+   g_ds_layout_valid = false;
+
+   if (!layout)
+      return;
+
+   if (sscanf(layout, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf",
+            &top_x_f, &top_y_f, &top_w_f, &top_h_f,
+            &bot_x_f, &bot_y_f, &bot_w_f, &bot_h_f,
+            &buf_w_f, &buf_h_f) != 10)
+      return;
+
+   g_ds_top_x = (int)lround(top_x_f);
+   g_ds_top_y = (int)lround(top_y_f);
+   g_ds_top_w = (int)lround(top_w_f);
+   g_ds_top_h = (int)lround(top_h_f);
+   g_ds_bot_x = (int)lround(bot_x_f);
+   g_ds_bot_y = (int)lround(bot_y_f);
+   g_ds_bot_w = (int)lround(bot_w_f);
+   g_ds_bot_h = (int)lround(bot_h_f);
+   g_ds_buf_w = (int)lround(buf_w_f);
+   g_ds_buf_h = (int)lround(buf_h_f);
+
+   if (g_ds_top_w <= 0 || g_ds_top_h <= 0 || g_ds_bot_w <= 0
+         || g_ds_bot_h <= 0 || g_ds_buf_w <= 0 || g_ds_buf_h <= 0)
+      return;
+
+   g_ds_layout_valid = true;
+}
+
+void set_desmume_core_active(bool active)
+{
+   g_is_desmume_core_active = active;
+
+   if (!active)
+   {
+      joyemu_replace_string(&g_desmume_custom_layout, NULL);
+      g_ds_layout_valid = false;
+   }
+}
+
+bool is_desmume_core_active(void)
+{
+   return g_is_desmume_core_active;
+}
+
+bool get_desmume_layout(
+      int *top_x, int *top_y, int *top_w, int *top_h,
+      int *bot_x, int *bot_y, int *bot_w, int *bot_h,
+      int *buf_w, int *buf_h)
+{
+   if (!g_ds_layout_valid)
+      return false;
+
+   if (top_x)
+      *top_x = g_ds_top_x;
+   if (top_y)
+      *top_y = g_ds_top_y;
+   if (top_w)
+      *top_w = g_ds_top_w;
+   if (top_h)
+      *top_h = g_ds_top_h;
+   if (bot_x)
+      *bot_x = g_ds_bot_x;
+   if (bot_y)
+      *bot_y = g_ds_bot_y;
+   if (bot_w)
+      *bot_w = g_ds_bot_w;
+   if (bot_h)
+      *bot_h = g_ds_bot_h;
+   if (buf_w)
+      *buf_w = g_ds_buf_w;
+   if (buf_h)
+      *buf_h = g_ds_buf_h;
+
+   return true;
+}
 
 #define SHADER_FILE_WATCH_DELAY_MSEC 500
 
@@ -1401,6 +1669,13 @@ bool runloop_environment_cb(unsigned cmd, void *data)
                runloop_st->flags |= RUNLOOP_FLAG_HAS_VARIABLE_UPDATE;
 #endif
             runloop_st->core_options->updated = false;
+
+            if (g_desmume_custom_layout && string_is_equal(var->key, "desmume_custom_layout_config"))
+            {
+               var->value = g_desmume_custom_layout;
+               RARCH_LOG("[JoyEMU-DeSmuME] GET_VARIABLE override: desmume_custom_layout_config = %s\n", var->value);
+               break;
+            }
 
             if (core_option_manager_get_idx(runloop_st->core_options,
                   var->key, &opt_idx))
@@ -5396,6 +5671,11 @@ void runloop_msg_queue_push(
       enum message_queue_icon icon,
       enum message_queue_category category)
 {
+   if (!joyemu_runloop_should_display_core_message_on_osd(0))
+   {
+      RARCH_LOG("[JoyEMU OSD suppressed]: %s\n", msg ? msg : "(null)");
+      return;
+   }
 #if defined(HAVE_GFX_WIDGETS)
    dispgfx_widget_t *p_dispwidget = dispwidget_get_ptr();
    bool widgets_active            = p_dispwidget->active;
@@ -6970,7 +7250,8 @@ static enum runloop_state_enum runloop_check_state(
          }
          else
 #endif
-         if (dispwidget_get_ptr()->active)
+         if (dispwidget_get_ptr()->active
+               && joyemu_runloop_should_display_core_message_on_osd(0))
             gfx_widget_set_generic_message(msg, 1000);
          else
 #endif
@@ -7028,7 +7309,8 @@ static enum runloop_state_enum runloop_check_state(
             _len += strlcpy(msg + _len, " (Auto)", sizeof(msg) - _len);
 
 #ifdef HAVE_GFX_WIDGETS
-         if (dispwidget_get_ptr()->active)
+         if (dispwidget_get_ptr()->active
+               && joyemu_runloop_should_display_core_message_on_osd(0))
             gfx_widget_set_generic_message(msg, 1000);
          else
 #endif
