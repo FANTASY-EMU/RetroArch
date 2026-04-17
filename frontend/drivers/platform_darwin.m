@@ -25,6 +25,7 @@
 
 #include <mach/mach.h>
 #include <dispatch/dispatch.h>
+#include <libkern/OSAtomic.h>
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreFoundation/CFArray.h>
