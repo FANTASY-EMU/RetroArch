@@ -41,6 +41,9 @@
 #include "input_remapping.h"
 #include "input_osk.h"
 #include "input_types.h"
+#ifdef HAVE_COCOATOUCH
+#include "drivers/cocoa_input.h"
+#endif
 
 #ifdef HAVE_BSV_MOVIE
 #include "bsv/bsvmovie.h"
@@ -80,6 +83,158 @@
 #include "../ai/game_ai.h"
 
 #define HOLD_BTN_DELAY_SEC 2
+
+static int16_t input_state_internal(
+      input_driver_state_t *input_st,
+      settings_t *settings,
+      unsigned port, unsigned device,
+      unsigned idx, unsigned id);
+
+static bool s_joyemu_desmume_pointer_logged = false;
+
+#if DEBUG && defined(HAVE_COCOATOUCH)
+typedef struct joyemu_test_cocoa_input_snapshot
+{
+   bool active;
+   input_driver_t *current_driver;
+   void *current_data;
+   const retro_keybind_set *libretro_input_binds[MAX_USERS];
+   unsigned input_max_users;
+   unsigned input_joypad_index[MAX_USERS];
+   unsigned input_analog_dpad_mode[MAX_USERS];
+   unsigned input_remap_ports[MAX_USERS];
+   unsigned input_remap_port_map[MAX_USERS][MAX_USERS + 1];
+   float input_axis_threshold;
+   float input_analog_deadzone;
+   float input_analog_sensitivity;
+} joyemu_test_cocoa_input_snapshot_t;
+
+static joyemu_test_cocoa_input_snapshot_t s_joyemu_test_cocoa_input_snapshot;
+
+static cocoa_input_data_t *joyemu_test_current_cocoa_input(void)
+{
+   input_driver_state_t *input_st = input_state_get_ptr();
+
+   if (!input_st || input_st->current_driver != &input_cocoa)
+      return NULL;
+
+   return (cocoa_input_data_t*)input_st->current_data;
+}
+#endif
+
+static bool joyemu_desmume_pointer_to_pixels(int16_t pointer_x, int16_t pointer_y,
+      int buf_w, int buf_h, int *out_x, int *out_y)
+{
+   int64_t pixel_x = 0;
+   int64_t pixel_y = 0;
+
+   if (pointer_x == -0x8000 || pointer_y == -0x8000 || buf_w <= 0 || buf_h <= 0)
+      return false;
+
+   pixel_x = ((int64_t)pointer_x + 0x7fff) * buf_w;
+   pixel_y = ((int64_t)pointer_y + 0x7fff) * buf_h;
+
+   if (out_x)
+      *out_x = (int)(pixel_x / 0xffff);
+   if (out_y)
+      *out_y = (int)(pixel_y / 0xffff);
+
+   return true;
+}
+
+static int16_t joyemu_desmume_pixel_to_pointer_x(int ds_x)
+{
+   int64_t mapped = ((int64_t)ds_x * 0xffff) / 256;
+   return (int16_t)(mapped - 0x7fff);
+}
+
+static int16_t joyemu_desmume_pixel_to_pointer_y(int ds_y)
+{
+   int64_t mapped = ((int64_t)ds_y * 0xffff) / 384;
+   return (int16_t)(mapped - 0x7fff);
+}
+
+static int16_t joyemu_desmume_remap_pointer(input_driver_state_t *input_st,
+      settings_t *settings, int16_t original, unsigned port, unsigned device,
+      unsigned idx, unsigned id)
+{
+   int bot_x = 0;
+   int bot_y = 0;
+   int bot_w = 0;
+   int bot_h = 0;
+   int buf_w = 0;
+   int buf_h = 0;
+   int16_t pointer_x = original;
+   int16_t pointer_y = original;
+   int px = 0;
+   int py = 0;
+   bool in_bottom = false;
+   int ds_x = 0;
+   int ds_y = 0;
+
+   if (!is_desmume_core_active())
+   {
+      s_joyemu_desmume_pointer_logged = false;
+      return original;
+   }
+
+   if (device != RETRO_DEVICE_POINTER || port != 0)
+      return original;
+
+   if (!get_desmume_layout(
+            NULL, NULL, NULL, NULL,
+            &bot_x, &bot_y, &bot_w, &bot_h,
+            &buf_w, &buf_h))
+      return original;
+
+   pointer_x = (id == RETRO_DEVICE_ID_POINTER_X)
+      ? original
+      : input_state_internal(input_st, settings, port, device, idx, RETRO_DEVICE_ID_POINTER_X);
+   pointer_y = (id == RETRO_DEVICE_ID_POINTER_Y)
+      ? original
+      : input_state_internal(input_st, settings, port, device, idx, RETRO_DEVICE_ID_POINTER_Y);
+
+   if (!joyemu_desmume_pointer_to_pixels(pointer_x, pointer_y, buf_w, buf_h, &px, &py))
+      return (id == RETRO_DEVICE_ID_POINTER_PRESSED) ? 0 : -0x8000;
+
+   in_bottom = px >= bot_x && px < (bot_x + bot_w)
+      && py >= bot_y && py < (bot_y + bot_h);
+
+   if (!in_bottom)
+      return (id == RETRO_DEVICE_ID_POINTER_PRESSED) ? 0 : -0x8000;
+
+   ds_x = ((px - bot_x) * 256) / bot_w;
+   ds_y = 192 + (((py - bot_y) * 192) / bot_h);
+
+   if (ds_x < 0)
+      ds_x = 0;
+   else if (ds_x > 255)
+      ds_x = 255;
+
+   if (ds_y < 192)
+      ds_y = 192;
+   else if (ds_y > 383)
+      ds_y = 383;
+
+   if (!s_joyemu_desmume_pointer_logged)
+   {
+      RARCH_LOG("[JoyEMU-DeSmuME] Pointer remap: raw=(%d,%d) px=(%d,%d) -> ds=(%d,%d) in_bot=%d\n",
+            pointer_x, pointer_y, px, py, ds_x, ds_y, in_bottom ? 1 : 0);
+      s_joyemu_desmume_pointer_logged = true;
+   }
+
+   switch (id)
+   {
+      case RETRO_DEVICE_ID_POINTER_X:
+         return joyemu_desmume_pixel_to_pointer_x(ds_x);
+      case RETRO_DEVICE_ID_POINTER_Y:
+         return joyemu_desmume_pixel_to_pointer_y(ds_y);
+      case RETRO_DEVICE_ID_POINTER_PRESSED:
+         return original ? 1 : 0;
+      default:
+         return original;
+   }
+}
 
 /* Precomputed reciprocals used in analog input scaling.
  * 0x8000 = 32768 is the full int16 range (unsigned half),
@@ -310,6 +465,11 @@ input_device_driver_t *joypad_drivers[] = {
 #endif
 #ifdef HAVE_MFI
    &mfi_joypad,
+#endif
+#if JOYENGINE_V2
+   &joyengine_joypad,
+#else
+   &joyemu_joypad,
 #endif
 #ifdef DJGPP
    &dos_joypad,
@@ -7485,6 +7645,10 @@ int16_t input_driver_state_wrapper(unsigned port, unsigned device,
    /* Read input state */
    result = input_state_internal(input_st, settings, port, device, idx, id);
 
+   if (is_desmume_core_active() && device == RETRO_DEVICE_POINTER)
+      result = joyemu_desmume_remap_pointer(
+            input_st, settings, result, port, device, idx, id);
+
    /* Register any analog stick input requests for
     * this 'virtual' (core) port */
    if (     (device == RETRO_DEVICE_ANALOG)
@@ -7514,6 +7678,273 @@ int16_t input_driver_state_wrapper(unsigned port, unsigned device,
 #endif
 
    return result;
+}
+
+bool joyemu_test_begin_cocoa_input_session(void)
+{
+#if DEBUG && defined(HAVE_COCOATOUCH)
+   settings_t *settings                  = config_get_ptr();
+   cocoa_input_data_t *apple             = NULL;
+   unsigned i                           = 0;
+   unsigned j                           = 0;
+
+   if (s_joyemu_test_cocoa_input_snapshot.active)
+      return false;
+
+   retroarch_config_init();
+   settings = config_get_ptr();
+
+   if (!settings)
+      return false;
+
+   memset(&s_joyemu_test_cocoa_input_snapshot, 0, sizeof(s_joyemu_test_cocoa_input_snapshot));
+   s_joyemu_test_cocoa_input_snapshot.active                   = true;
+   s_joyemu_test_cocoa_input_snapshot.current_driver           = input_driver_st.current_driver;
+   s_joyemu_test_cocoa_input_snapshot.current_data             = input_driver_st.current_data;
+   memcpy(
+         s_joyemu_test_cocoa_input_snapshot.libretro_input_binds,
+         input_driver_st.libretro_input_binds,
+         sizeof(s_joyemu_test_cocoa_input_snapshot.libretro_input_binds));
+   s_joyemu_test_cocoa_input_snapshot.input_max_users          = settings->uints.input_max_users;
+   memcpy(
+         s_joyemu_test_cocoa_input_snapshot.input_joypad_index,
+         settings->uints.input_joypad_index,
+         sizeof(s_joyemu_test_cocoa_input_snapshot.input_joypad_index));
+   memcpy(
+         s_joyemu_test_cocoa_input_snapshot.input_analog_dpad_mode,
+         settings->uints.input_analog_dpad_mode,
+         sizeof(s_joyemu_test_cocoa_input_snapshot.input_analog_dpad_mode));
+   memcpy(
+         s_joyemu_test_cocoa_input_snapshot.input_remap_ports,
+         settings->uints.input_remap_ports,
+         sizeof(s_joyemu_test_cocoa_input_snapshot.input_remap_ports));
+   memcpy(
+         s_joyemu_test_cocoa_input_snapshot.input_remap_port_map,
+         settings->uints.input_remap_port_map,
+         sizeof(s_joyemu_test_cocoa_input_snapshot.input_remap_port_map));
+   s_joyemu_test_cocoa_input_snapshot.input_axis_threshold     = settings->floats.input_axis_threshold;
+   s_joyemu_test_cocoa_input_snapshot.input_analog_deadzone    = settings->floats.input_analog_deadzone;
+   s_joyemu_test_cocoa_input_snapshot.input_analog_sensitivity = settings->floats.input_analog_sensitivity;
+
+   apple = (cocoa_input_data_t*)calloc(1, sizeof(*apple));
+   if (!apple)
+   {
+      memset(&s_joyemu_test_cocoa_input_snapshot, 0, sizeof(s_joyemu_test_cocoa_input_snapshot));
+      return false;
+   }
+
+   input_config_reset();
+
+   settings->uints.input_max_users             = MAX_USERS;
+   settings->floats.input_axis_threshold       = 0.5f;
+   settings->floats.input_analog_deadzone      = 0.0f;
+   settings->floats.input_analog_sensitivity   = 1.0f;
+
+   for (i = 0; i < MAX_USERS; i++)
+   {
+      settings->uints.input_joypad_index[i]     = i;
+      settings->uints.input_analog_dpad_mode[i] = ANALOG_DPAD_NONE;
+      settings->uints.input_remap_ports[i]      = i;
+
+      for (j = 0; j < (MAX_USERS + 1); j++)
+         settings->uints.input_remap_port_map[i][j] = MAX_USERS;
+
+      settings->uints.input_remap_port_map[i][0] = i;
+      input_driver_st.libretro_input_binds[i] =
+            (const retro_keybind_set*)&input_config_binds[i];
+   }
+
+   input_driver_st.current_driver = &input_cocoa;
+   input_driver_st.current_data   = apple;
+   memset(input_driver_st.analog_requested, 0, sizeof(input_driver_st.analog_requested));
+
+   return true;
+#else
+   return false;
+#endif
+}
+
+void joyemu_test_end_cocoa_input_session(void)
+{
+#if DEBUG && defined(HAVE_COCOATOUCH)
+   settings_t *settings = config_get_ptr();
+   void *current_data   = NULL;
+
+   if (!s_joyemu_test_cocoa_input_snapshot.active)
+      return;
+
+   current_data = input_driver_st.current_data;
+
+   input_driver_st.current_driver = s_joyemu_test_cocoa_input_snapshot.current_driver;
+   input_driver_st.current_data   = s_joyemu_test_cocoa_input_snapshot.current_data;
+   memcpy(
+         input_driver_st.libretro_input_binds,
+         s_joyemu_test_cocoa_input_snapshot.libretro_input_binds,
+         sizeof(s_joyemu_test_cocoa_input_snapshot.libretro_input_binds));
+
+   if (settings)
+   {
+      settings->uints.input_max_users = s_joyemu_test_cocoa_input_snapshot.input_max_users;
+      memcpy(
+            settings->uints.input_joypad_index,
+            s_joyemu_test_cocoa_input_snapshot.input_joypad_index,
+            sizeof(s_joyemu_test_cocoa_input_snapshot.input_joypad_index));
+      memcpy(
+            settings->uints.input_analog_dpad_mode,
+            s_joyemu_test_cocoa_input_snapshot.input_analog_dpad_mode,
+            sizeof(s_joyemu_test_cocoa_input_snapshot.input_analog_dpad_mode));
+      memcpy(
+            settings->uints.input_remap_ports,
+            s_joyemu_test_cocoa_input_snapshot.input_remap_ports,
+            sizeof(s_joyemu_test_cocoa_input_snapshot.input_remap_ports));
+      memcpy(
+            settings->uints.input_remap_port_map,
+            s_joyemu_test_cocoa_input_snapshot.input_remap_port_map,
+            sizeof(s_joyemu_test_cocoa_input_snapshot.input_remap_port_map));
+      settings->floats.input_axis_threshold      = s_joyemu_test_cocoa_input_snapshot.input_axis_threshold;
+      settings->floats.input_analog_deadzone     = s_joyemu_test_cocoa_input_snapshot.input_analog_deadzone;
+      settings->floats.input_analog_sensitivity  = s_joyemu_test_cocoa_input_snapshot.input_analog_sensitivity;
+   }
+
+   if (current_data && current_data != s_joyemu_test_cocoa_input_snapshot.current_data)
+      free(current_data);
+
+   memset(&s_joyemu_test_cocoa_input_snapshot, 0, sizeof(s_joyemu_test_cocoa_input_snapshot));
+#endif
+}
+
+bool joyemu_test_read_cocoa_touch(
+      unsigned idx,
+      unsigned *touch_count,
+      int *screen_x,
+      int *screen_y,
+      int *confined_x,
+      int *confined_y,
+      int *fixed_x,
+      int *fixed_y,
+      int *full_x,
+      int *full_y)
+{
+#if DEBUG && defined(HAVE_COCOATOUCH)
+   cocoa_input_data_t *apple       = joyemu_test_current_cocoa_input();
+   const cocoa_touch_data_t *touch = NULL;
+
+   if (!apple || idx >= MAX_TOUCHES)
+      return false;
+
+   touch = &apple->touches[idx];
+
+   if (touch_count)
+      *touch_count = apple->touch_count;
+   if (screen_x)
+      *screen_x = touch->screen_x;
+   if (screen_y)
+      *screen_y = touch->screen_y;
+   if (confined_x)
+      *confined_x = touch->confined_x;
+   if (confined_y)
+      *confined_y = touch->confined_y;
+   if (fixed_x)
+      *fixed_x = touch->fixed_x;
+   if (fixed_y)
+      *fixed_y = touch->fixed_y;
+   if (full_x)
+      *full_x = touch->full_x;
+   if (full_y)
+      *full_y = touch->full_y;
+
+   return true;
+#else
+   (void)idx;
+   (void)touch_count;
+   (void)screen_x;
+   (void)screen_y;
+   (void)confined_x;
+   (void)confined_y;
+   (void)fixed_x;
+   (void)fixed_y;
+   (void)full_x;
+   (void)full_y;
+   return false;
+#endif
+}
+
+bool joyemu_test_prime_cocoa_touch_geometry(
+      unsigned idx,
+      int vp_x,
+      int vp_y,
+      int vp_width,
+      int vp_height,
+      int full_width,
+      int full_height)
+{
+#if DEBUG && defined(HAVE_COCOATOUCH)
+   cocoa_input_data_t *apple = joyemu_test_current_cocoa_input();
+   video_viewport_t vp       = {0};
+   cocoa_touch_data_t *touch = NULL;
+
+   if (!apple || idx >= MAX_TOUCHES)
+      return false;
+
+   touch          = &apple->touches[idx];
+   vp.x           = vp_x;
+   vp.y           = vp_y;
+   vp.width       = (unsigned)vp_width;
+   vp.height      = (unsigned)vp_height;
+   vp.full_width  = (unsigned)full_width;
+   vp.full_height = (unsigned)full_height;
+
+   if (!video_driver_translate_coord_viewport(
+            &vp,
+            touch->screen_x,
+            touch->screen_y,
+            &touch->confined_x,
+            &touch->confined_y,
+            &touch->full_x,
+            &touch->full_y,
+            false))
+      return false;
+
+   if (!video_driver_translate_coord_viewport(
+            &vp,
+            touch->screen_x,
+            touch->screen_y,
+            &touch->fixed_x,
+            &touch->fixed_y,
+            &touch->full_x,
+            &touch->full_y,
+            true))
+      return false;
+
+   return true;
+#else
+   (void)idx;
+   (void)vp_x;
+   (void)vp_y;
+   (void)vp_width;
+   (void)vp_height;
+   (void)full_width;
+   (void)full_height;
+   return false;
+#endif
+}
+
+int joyemu_test_read_pointer_x(unsigned idx)
+{
+   return input_driver_state_wrapper(
+         0, RETRO_DEVICE_POINTER, idx, RETRO_DEVICE_ID_POINTER_X);
+}
+
+int joyemu_test_read_pointer_y(unsigned idx)
+{
+   return input_driver_state_wrapper(
+         0, RETRO_DEVICE_POINTER, idx, RETRO_DEVICE_ID_POINTER_Y);
+}
+
+int joyemu_test_read_pointer_pressed(unsigned idx)
+{
+   return input_driver_state_wrapper(
+         0, RETRO_DEVICE_POINTER, idx, RETRO_DEVICE_ID_POINTER_PRESSED);
 }
 
 #ifdef HAVE_HID
