@@ -3905,6 +3905,9 @@ static bool config_load_file(global_t *global,
    }
 #endif
 
+   if (!conf && !path_is_empty(RARCH_PATH_CONFIG_APPEND))
+      conf = config_file_new_alloc();
+
    if (!conf)
    {
       first_load = false;
