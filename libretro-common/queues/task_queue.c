@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 
 #include <queues/task_queue.h>
 
@@ -69,6 +70,8 @@ static task_queue_t tasks_finished          = {NULL, NULL};
 
 static struct retro_task_impl *impl_current = NULL;
 static bool task_threaded_enable            = false;
+static atomic_uint tasks_in_transfer        = 0;
+static atomic_uint blocking_tasks_in_transfer = 0;
 
 #ifdef HAVE_THREADS
 static uintptr_t main_thread_id             = 0;
@@ -186,6 +189,47 @@ static retro_task_t *task_queue_get(task_queue_t *queue)
    }
 
    return task;
+}
+
+bool joyemu_task_queue_should_wait_for_pending_callbacks(
+      bool has_visible_tasks, unsigned transfer_count)
+{
+   return has_visible_tasks || transfer_count > 0;
+}
+
+static unsigned task_queue_transfer_count(void)
+{
+   return (unsigned)atomic_load(&tasks_in_transfer);
+}
+
+static void task_queue_begin_transfer(retro_task_t *task)
+{
+   atomic_fetch_add(&tasks_in_transfer, 1);
+
+   if (task && task->type == TASK_TYPE_BLOCKING)
+      atomic_fetch_add(&blocking_tasks_in_transfer, 1);
+}
+
+static void task_queue_end_transfer(retro_task_t *task)
+{
+   if (task && task->type == TASK_TYPE_BLOCKING)
+      atomic_fetch_sub(&blocking_tasks_in_transfer, 1);
+
+   atomic_fetch_sub(&tasks_in_transfer, 1);
+}
+
+static bool task_queue_find_in_list(const task_queue_t *queue,
+      retro_task_finder_t func, void *user_data)
+{
+   retro_task_t *task = queue ? queue->front : NULL;
+
+   for (; task; task = task->next)
+   {
+      if (func(task, user_data))
+         return true;
+   }
+
+   return false;
 }
 
 static void retro_task_internal_gather(void)
@@ -442,18 +486,23 @@ static void retro_task_threaded_wait(retro_task_condition_fn_t cond, void* data)
 
    do
    {
+      bool has_visible_tasks = false;
       retro_task_threaded_gather();
 
       slock_lock(running_lock);
-      wait = (tasks_running.front && !tasks_running.front->when);
+      has_visible_tasks = (tasks_running.front && !tasks_running.front->when);
       slock_unlock(running_lock);
 
-      if (!wait)
+      if (!has_visible_tasks)
       {
          slock_lock(finished_lock);
-         wait = (tasks_finished.front && !tasks_finished.front->when);
+         has_visible_tasks = (tasks_finished.front && !tasks_finished.front->when);
          slock_unlock(finished_lock);
       }
+
+      wait = joyemu_task_queue_should_wait_for_pending_callbacks(
+            has_visible_tasks,
+            task_queue_transfer_count());
    } while (wait && (!cond || cond(data)));
 }
 
@@ -567,6 +616,8 @@ static void threaded_worker(void *userdata)
       }
       else
       {
+         task_queue_begin_transfer(task);
+
          /* Remove task from running queue */
          slock_lock(running_lock);
          slock_lock(queue_lock);
@@ -577,6 +628,7 @@ static void threaded_worker(void *userdata)
          /* Add task to finished queue */
          slock_lock(finished_lock);
          task_queue_put(&tasks_finished, task);
+         task_queue_end_transfer(task);
          slock_unlock(finished_lock);
       }
    }
@@ -677,6 +729,8 @@ static void gcd_worker(retro_task_t *task)
                      ^{ gcd_worker(task); });
    else
    {
+      task_queue_begin_transfer(task);
+
       /* Remove task from running queue */
       slock_lock(running_lock);
       slock_lock(queue_lock);
@@ -690,6 +744,7 @@ static void gcd_worker(retro_task_t *task)
       /* Add task to finished queue */
       slock_lock(finished_lock);
       task_queue_put(&tasks_finished, task);
+      task_queue_end_transfer(task);
       slock_unlock(finished_lock);
    }
 }
@@ -713,22 +768,26 @@ static void retro_task_gcd_wait(retro_task_condition_fn_t cond, void* data)
    do
    {
       retro_task_t *task = NULL;
+      bool has_visible_tasks = false;
       retro_task_threaded_gather();
 
       slock_lock(running_lock);
-      wait = false;
       /* can't just look at the first task like threaded, they're not sorted by when */
-      for (task = tasks_running.front; !wait && task; task = task->next)
-         wait |= !task->when;
+      for (task = tasks_running.front; !has_visible_tasks && task; task = task->next)
+         has_visible_tasks |= !task->when;
       slock_unlock(running_lock);
 
-      if (!wait)
+      if (!has_visible_tasks)
       {
          slock_lock(finished_lock);
-         for (task = tasks_finished.front; !wait && task; task = task->next)
-            wait |= !task->when;
+         for (task = tasks_finished.front; !has_visible_tasks && task; task = task->next)
+            has_visible_tasks |= !task->when;
          slock_unlock(finished_lock);
       }
+
+      wait = joyemu_task_queue_should_wait_for_pending_callbacks(
+            has_visible_tasks,
+            task_queue_transfer_count());
    } while (wait && (!cond || cond(data)));
 }
 
@@ -839,6 +898,44 @@ bool task_queue_is_threaded(void)
 bool task_queue_find(task_finder_data_t *find_data)
 {
    return impl_current->find(find_data->func, find_data->userdata);
+}
+
+bool task_queue_find_including_finished(task_finder_data_t *find_data)
+{
+   bool ret = false;
+
+#ifdef HAVE_THREADS
+   if (impl_current != &impl_regular)
+   {
+      slock_lock(running_lock);
+      ret = task_queue_find_in_list(&tasks_running,
+            find_data->func, find_data->userdata);
+      slock_unlock(running_lock);
+
+      if (ret)
+         return true;
+
+      slock_lock(finished_lock);
+      ret = task_queue_find_in_list(&tasks_finished,
+            find_data->func, find_data->userdata);
+      slock_unlock(finished_lock);
+
+      return ret;
+   }
+#endif
+
+   ret = task_queue_find_in_list(&tasks_running,
+         find_data->func, find_data->userdata);
+   if (ret)
+      return true;
+
+   return task_queue_find_in_list(&tasks_finished,
+         find_data->func, find_data->userdata);
+}
+
+bool task_queue_blocking_task_in_transfer(void)
+{
+   return atomic_load(&blocking_tasks_in_transfer) > 0;
 }
 
 void task_queue_retrieve(task_retriever_data_t *data)
