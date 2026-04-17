@@ -184,10 +184,15 @@ static void cocoa_gl_gfx_ctx_destroy(void *data)
     * tries to delete framebuffers after the context has been destroyed. */
    if (glk_view)
       [glk_view deleteDrawable];
+   if (glk_view)
+      glk_view.context = nil;
    [EAGLContext setCurrentContext:nil];
 #endif
    g_hw_ctx = nil;
    g_ctx = nil;
+#if defined(HAVE_COCOATOUCH)
+   glk_view = nil;
+#endif
 
    free(cocoa_ctx);
 }
