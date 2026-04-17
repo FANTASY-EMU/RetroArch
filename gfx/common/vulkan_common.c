@@ -2450,6 +2450,8 @@ bool vulkan_context_init(gfx_ctx_vulkan_data_t *vk,
       if (!vulkan_library && __builtin_available(macOS 10.15, iOS 13, tvOS 12, *))
          vulkan_library = dylib_load("MoltenVK");
       if (!vulkan_library)
+         vulkan_library = dylib_load("@rpath/MoltenVK.framework");
+      if (!vulkan_library)
          vulkan_library = dylib_load("MoltenVK-v1.2.7.framework");
 #else
       vulkan_library = dylib_load("libvulkan.so.1");

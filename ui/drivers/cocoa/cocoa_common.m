@@ -176,29 +176,21 @@ void rarch_stop_draw_observer(void)
 -(void)step:(CADisplayLink*)target API_AVAILABLE(macos(14.0), ios(3.1), tvos(3.1))
 {
 #if defined(IOS)
+   /* JoyEngine v2 uses JEPlatformDriver's CFRunLoopObserver as the single
+    * emulation tick source. Keep CADisplayLink as a lightweight wake source. */
+   extern bool rarch_draw_observer_is_active(void);
+
+   (void)target;
+
    if ([[UIApplication sharedApplication] applicationState] != UIApplicationStateActive)
       return;
 
-   int ret = runloop_iterate();
+   if (!rarch_draw_observer_is_active())
+       return;
 
-   task_queue_check();
-
-   if (ret == -1)
-   {
-      main_exit(NULL);
-      exit(0);
-      return;
-   }
-
-#if !TARGET_OS_TV
    uint32_t runloop_flags = runloop_get_flags();
-   if (runloop_flags & RUNLOOP_FLAG_FASTMOTION)
-   {
-      /* Fast-forward: observer handles all iterations */
-      rarch_start_draw_observer();
-      CFRunLoopWakeUp(CFRunLoopGetMain());
-   }
-#endif
+   if (!(runloop_flags & RUNLOOP_FLAG_IDLE))
+       CFRunLoopWakeUp(CFRunLoopGetMain());
 #endif
 }
 #endif
@@ -212,18 +204,14 @@ void rarch_stop_draw_observer(void)
       nsview_set_ptr(view);
 #if defined(IOS)
       view.displayLink = [CADisplayLink displayLinkWithTarget:view selector:@selector(step:)];
-      {
-         float hz = (float)[UIScreen mainScreen].maximumFramesPerSecond;
 #if __IPHONE_OS_VERSION_MAX_ALLOWED >= 150000 || __TV_OS_VERSION_MAX_ALLOWED >= 150000
-         if (@available(iOS 15.0, tvOS 15.0, *))
-            [view.displayLink setPreferredFrameRateRange:
-               CAFrameRateRangeMake(hz * 0.9, hz * 1.2, hz)];
-         else
-            view.displayLink.preferredFramesPerSecond = hz;
+      if (@available(iOS 15.0, tvOS 15.0, *))
+         [view.displayLink setPreferredFrameRateRange:CAFrameRateRangeMake(60, 60, 60)];
+      else
+         view.displayLink.preferredFramesPerSecond = 60;
 #else
-         view.displayLink.preferredFramesPerSecond = hz;
+      view.displayLink.preferredFramesPerSecond = 60;
 #endif
-      }
       [view.displayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
 #elif defined(OSX) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
       if (@available(macOS 14.0, *))
