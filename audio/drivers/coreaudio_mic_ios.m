@@ -89,56 +89,34 @@ static OSStatus coreaudio_input_callback(
     return status;
 }
 
-/* Initialize CoreAudio microphone driver */
+/* Initialize CoreAudio microphone driver
+ *
+ * NOTE: driver_context and mic_context MUST be distinct allocations (see
+ * microphone_driver.h). Previously this returned a calloc'd
+ * coreaudio_microphone_t and open_mic/close_mic aliased that same pointer as
+ * the mic handle — which caused a double free on shutdown:
+ *   microphone_driver_deinit -> close_mic (free) -> driver->free (free) -> abort().
+ * We follow the same pattern as coreaudio_mic_macos.m: the driver state is a
+ * non-NULL placeholder, and open_mic allocates a fresh mic handle. */
 static void *coreaudio_microphone_init(void)
 {
-   coreaudio_microphone_t *microphone = (coreaudio_microphone_t*)calloc(1, sizeof(*microphone));
-   if (!microphone)
-   {
-      RARCH_ERR("[CoreAudio] Failed to allocate microphone driver.\n");
-      return NULL;
-   }
-
-   /* Default sample rate will be set during open_mic */
-   microphone->sample_rate = 0;
-   microphone->nonblock    = false;
-   microphone->use_float   = false;
-
-   return microphone;
+   return (void*)1;
 }
 
-/* Free CoreAudio microphone driver */
+/* Free CoreAudio microphone driver.
+ * driver_context is a placeholder from init() — nothing to free. */
 static void coreaudio_microphone_free(void *driver_context)
 {
-   coreaudio_microphone_t *microphone = (coreaudio_microphone_t*)driver_context;
-   if (microphone)
-   {
-      if (microphone->audio_unit && microphone->is_running)
-      {
-         AudioOutputUnitStop(microphone->audio_unit);
-         microphone->is_running = false;
-      }
-
-      /* TODO: This crashes, though we protect calls around `audio_unit` nil! */
-#if 0
-      if (microphone->audio_unit)
-      {
-         AudioComponentInstanceDispose(microphone->audio_unit);
-         microphone->audio_unit = nil;
-      }
-#endif
-      if (microphone->sample_buffer)
-         fifo_free(microphone->sample_buffer);
-      free(microphone);
-   }
+   (void)driver_context;
 }
 
 /* Read samples from microphone */
 static int coreaudio_microphone_read(void *driver_context,
       void *microphone_context, void *buf, size_t size)
 {
-   coreaudio_microphone_t *microphone = (coreaudio_microphone_t*)driver_context;
+   coreaudio_microphone_t *microphone = (coreaudio_microphone_t*)microphone_context;
    size_t avail, read_amt;
+   (void)driver_context;
 
    if (!microphone || !buf)
    {
@@ -163,12 +141,13 @@ static int coreaudio_microphone_read(void *driver_context,
    return (int)read_amt;
 }
 
-/* Set non-blocking state */
+/* Set non-blocking state.
+ * driver_context is a placeholder in this driver; read() already returns
+ * immediately with whatever is currently available, so nonblock is a no-op. */
 static void coreaudio_microphone_set_nonblock_state(void *driver_context, bool state)
 {
-   coreaudio_microphone_t *microphone = (coreaudio_microphone_t*)driver_context;
-   if (microphone)
-      microphone->nonblock = state;
+   (void)driver_context;
+   (void)state;
 }
 
 /* Helper method to set audio format */
@@ -199,14 +178,18 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
       unsigned latency,
       unsigned *new_rate)
 {
-   coreaudio_microphone_t *microphone = (coreaudio_microphone_t*)driver_context;
+   (void)driver_context;
+
+   /* Allocate a fresh mic handle — this is a DIFFERENT allocation from the
+    * driver context so close_mic can free it without affecting driver state. */
+   coreaudio_microphone_t *microphone =
+         (coreaudio_microphone_t*)calloc(1, sizeof(*microphone));
    if (!microphone)
    {
-      RARCH_ERR("[CoreAudio] Invalid driver context.\n");
+      RARCH_ERR("[CoreAudio] Failed to allocate microphone handle.\n");
       return NULL;
    }
 
-   /* Initialize handle fields */
    microphone->sample_rate = rate;
    microphone->use_float   = false; /* Default to integer format */
 
@@ -218,13 +201,34 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
    }
 
 #if TARGET_OS_IPHONE
-   /* Configure audio session */
+   /* Configure audio session.
+    *
+    * REGRESSION FIX (Skin-ODR merge, joyengine-ra-integration):
+    * The bare `setCategory:PlayAndRecord error:` call (no options) was a
+    * destructive override of JoyEngine's session policy. With no options,
+    * iOS drops MixWithOthers *and* routes output to the Receiver (earpiece)
+    * instead of the main speaker, producing the "game audio is very quiet"
+    * symptom once the microphone is opened (melonDS "blow" gesture, etc.).
+    *
+    * `coreaudio_mic_macos.m` does not touch the session at all — only the
+    * iOS driver did. Fix: keep PlayAndRecord (needed to open an input bus)
+    * but preserve the options JEAudioSession already established and add
+    * DefaultToSpeaker so output stays on the loud speaker. MixWithOthers
+    * keeps us friendly with other foreground audio; AllowBluetoothA2DP and
+    * AllowAirPlay keep external outputs working; DefaultToSpeaker is the
+    * one that blocks the silent Receiver fallback. */
    AVAudioSession *audioSession = [AVAudioSession sharedInstance];
    NSError *error = nil;
-   [audioSession setCategory:AVAudioSessionCategoryPlayAndRecord error:&error];
+   [audioSession setCategory:AVAudioSessionCategoryPlayAndRecord
+                 withOptions:AVAudioSessionCategoryOptionMixWithOthers
+                           | AVAudioSessionCategoryOptionAllowBluetoothA2DP
+                           | AVAudioSessionCategoryOptionAllowAirPlay
+                           | AVAudioSessionCategoryOptionDefaultToSpeaker
+                       error:&error];
    if (error)
    {
       RARCH_ERR("[CoreAudio] Failed to set audio session category: %s.\n", [[error localizedDescription] UTF8String]);
+      free(microphone);
       return NULL;
    }
 
@@ -233,6 +237,7 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
    if (error)
    {
       RARCH_ERR("[CoreAudio] Failed to set preferred sample rate: %s.\n", [[error localizedDescription] UTF8String]);
+      free(microphone);
       return NULL;
    }
 
@@ -266,6 +271,7 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
    if (!microphone->sample_buffer)
    {
       RARCH_ERR("[CoreAudio] Failed to create sample buffer.\n");
+      free(microphone);
       return NULL;
    }
 
