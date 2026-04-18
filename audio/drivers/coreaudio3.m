@@ -275,9 +275,23 @@ static void rb_read_data_interleaved(ringbuffer_h r,
       ringbuffer_h rb = &_rb;
       __block dispatch_semaphore_t sema = _sema;
       __block BOOL interleaved = _interleaved;
+      // #region agent log
+      static _Atomic int _dbg_underflow_count = 0;
+      static _Atomic int _dbg_callback_count = 0;
+      // #endregion
 
       au.outputProvider = ^AUAudioUnitStatus(AudioUnitRenderActionFlags * actionFlags, const AudioTimeStamp * timestamp, AUAudioFrameCount frameCount, NSInteger inputBusNumber, AudioBufferList * inputData)
       {
+         // #region agent log
+         size_t have = rb_len(rb);
+         size_t need = interleaved ? (frameCount * 2) : frameCount;
+         int cbCount = atomic_fetch_add(&_dbg_callback_count, 1);
+         if (have < need) {
+            int ufCount = atomic_fetch_add(&_dbg_underflow_count, 1);
+            if (ufCount < 100 || ufCount % 200 == 0)
+               NSLog(@"[DBG-f28977][H5-UF] coreaudio3 underflow #%d: have=%zu need=%zu (cb#%d)", ufCount, have, need, cbCount);
+         }
+         // #endregion
          if (interleaved)
             rb_read_data_interleaved(rb, inputData->mBuffers[0].mData, frameCount);
          else
@@ -301,6 +315,11 @@ static void rb_read_data_interleaved(ringbuffer_h r,
       RARCH_LOG("[CoreAudio3] Using buffer size of %u bytes: (latency = %u ms, hw rate = %u Hz, %s).\n",
             (unsigned)self.bufferSizeInBytes, (unsigned)latency, _hwRate,
             _interleaved ? "interleaved" : "non-interleaved");
+      // #region agent log
+      NSLog(@"[DBG-f28977][INIT] coreaudio3 ACTIVE: hwRate=%u latency=%u bufSize=%u %s",
+            _hwRate, (unsigned)latency, (unsigned)self.bufferSizeInBytes,
+            _interleaved ? "interleaved" : "non-interleaved");
+      // #endregion
 
       [self start];
    }
@@ -367,8 +386,12 @@ static void rb_read_data_interleaved(ringbuffer_h r,
          /* If the audio unit has stopped (e.g. audio session interrupted
           * by a phone call), bail out immediately - the callback that
           * drains the buffer will never fire. */
-         if (!_au.running)
+         if (!_au.running) {
+            // #region agent log
+            NSLog(@"[DBG-f28977][H6] writeFloat bail: _au.running=NO, samples_written=%zu", _len);
+            // #endregion
             break;
+         }
          /* Brief timeout as a safety net: if the audio unit stops
           * during the wait, we'll re-check _au.running promptly. */
          dispatch_semaphore_wait(_sema,

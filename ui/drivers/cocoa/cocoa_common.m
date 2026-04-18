@@ -54,6 +54,9 @@
 
 #include "../../input/drivers/cocoa_input.h"
 #include "../../input/drivers_keyboard/keyboard_event_apple.h"
+#if defined(IOS)
+#include "../../../../../JoyEngine/Adapter/JEAdapter.h"
+#endif
 
 #ifdef HAVE_MENU
 #include "../../menu/menu_driver.h"
@@ -179,8 +182,8 @@ void rarch_stop_draw_observer(void)
    /* JoyEngine v2 uses JEPlatformDriver's CFRunLoopObserver as the single
     * emulation tick source. Keep CADisplayLink as a lightweight wake source. */
    extern bool rarch_draw_observer_is_active(void);
-
-   (void)target;
+   static CFTimeInterval s_last_step_log = 0.0;
+   static CFTimeInterval s_last_step_time = 0.0;
 
    if ([[UIApplication sharedApplication] applicationState] != UIApplicationStateActive)
       return;
@@ -189,6 +192,31 @@ void rarch_stop_draw_observer(void)
        return;
 
    uint32_t runloop_flags = runloop_get_flags();
+   CFTimeInterval now = CACurrentMediaTime();
+   if ((now - s_last_step_log) > 0.45)
+   {
+      double delta_ms = s_last_step_time > 0.0 ? (now - s_last_step_time) * 1000.0 : -1.0;
+      // #region agent log
+      je_agent_debug_ingest_log_json(
+            "cocoa_common.step",
+            "display link wake cadence",
+            "H7",
+            "run3",
+            [[NSString stringWithFormat:
+               @"{\"duration\":%.3f,\"timestamp\":%.3f,\"deltaMs\":%.3f,\"preferredFps\":%ld,\"observerActive\":%s,\"idle\":%s,\"fastmotion\":%s}",
+               target.duration,
+               now,
+               delta_ms,
+               (long)target.preferredFramesPerSecond,
+               rarch_draw_observer_is_active() ? "true" : "false",
+               (runloop_flags & RUNLOOP_FLAG_IDLE) ? "true" : "false",
+               (runloop_flags & RUNLOOP_FLAG_FASTMOTION) ? "true" : "false"
+            ] UTF8String]
+      );
+      // #endregion
+      s_last_step_log = now;
+   }
+   s_last_step_time = now;
    if (!(runloop_flags & RUNLOOP_FLAG_IDLE))
        CFRunLoopWakeUp(CFRunLoopGetMain());
 #endif

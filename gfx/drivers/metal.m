@@ -66,6 +66,7 @@
 
 #include "../../ui/drivers/cocoa/apple_platform.h"
 #include "../../ui/drivers/cocoa/cocoa_common.h"
+#include "../../../../JoyEngine/Adapter/JEAdapter.h"
 
 #define STRUCT_ASSIGN(x, y) \
 { \
@@ -2382,6 +2383,30 @@ static bool metal_frame(void *data, const void *frame,
 {
    int j;
    MetalDriver *md = (__bridge MetalDriver *)data;
+   bool track_nonblock = video_info && video_info->input_driver_nonblock_state;
+#if DEBUG
+   static CFTimeInterval s_last_nonblock_perf_log = 0.0;
+   static CFTimeInterval s_nonblock_perf_window_started_at = 0.0;
+   static uint32_t s_nonblock_perf_count = 0;
+   static double s_nonblock_render_total_ms = 0.0;
+   static double s_nonblock_render_max_ms = 0.0;
+   static double s_nonblock_swap_total_ms = 0.0;
+   static double s_nonblock_swap_max_ms = 0.0;
+   if (!track_nonblock)
+   {
+      s_last_nonblock_perf_log = 0.0;
+      s_nonblock_perf_window_started_at = 0.0;
+      s_nonblock_perf_count = 0;
+      s_nonblock_render_total_ms = 0.0;
+      s_nonblock_render_max_ms = 0.0;
+      s_nonblock_swap_total_ms = 0.0;
+      s_nonblock_swap_max_ms = 0.0;
+   }
+   else if (s_nonblock_perf_window_started_at <= 0.0)
+      s_nonblock_perf_window_started_at = CACurrentMediaTime();
+#endif
+
+   CFTimeInterval render_started_at = CACurrentMediaTime();
 
    if (![md renderFrame:frame
                    data:data
@@ -2392,11 +2417,60 @@ static bool metal_frame(void *data, const void *frame,
                     msg:msg
                    info:video_info])
       return false;
+   double render_elapsed_ms = (CACurrentMediaTime() - render_started_at) * 1000.0;
 
    /* Call swap_buffers to acquire next drawable. This moves the blocking
     * acquisition to AFTER presenting (like Vulkan), instead of BEFORE
     * rendering. This is critical for proper 120Hz on ProMotion displays. */
+   CFTimeInterval swap_started_at = CACurrentMediaTime();
    metal_ctx_swap_buffers(NULL);
+   double swap_elapsed_ms = (CACurrentMediaTime() - swap_started_at) * 1000.0;
+
+#if DEBUG
+   if (track_nonblock)
+   {
+      s_nonblock_perf_count++;
+      s_nonblock_render_total_ms += render_elapsed_ms;
+      s_nonblock_swap_total_ms += swap_elapsed_ms;
+      if (render_elapsed_ms > s_nonblock_render_max_ms)
+         s_nonblock_render_max_ms = render_elapsed_ms;
+      if (swap_elapsed_ms > s_nonblock_swap_max_ms)
+         s_nonblock_swap_max_ms = swap_elapsed_ms;
+
+      CFTimeInterval perf_now = CACurrentMediaTime();
+      if ((perf_now - s_last_nonblock_perf_log) > 0.45)
+      {
+         // #region agent log
+         NSString *perfPayload = [NSString stringWithFormat:
+            @"{\"windowMs\":%.3f,\"count\":%u,\"frameCount\":%llu,\"renderAvgMs\":%.3f,\"renderMaxMs\":%.3f,\"swapAvgMs\":%.3f,\"swapMaxMs\":%.3f,\"swapInterval\":%u,\"shaderSubframes\":%u,\"inputNonblock\":%s}",
+            (perf_now - s_nonblock_perf_window_started_at) * 1000.0,
+            s_nonblock_perf_count,
+            (unsigned long long)frame_count,
+            s_nonblock_perf_count > 0 ? (s_nonblock_render_total_ms / (double)s_nonblock_perf_count) : 0.0,
+            s_nonblock_render_max_ms,
+            s_nonblock_perf_count > 0 ? (s_nonblock_swap_total_ms / (double)s_nonblock_perf_count) : 0.0,
+            s_nonblock_swap_max_ms,
+            metal_swap_interval,
+            video_info ? video_info->shader_subframes : 0,
+            track_nonblock ? "true" : "false"];
+         je_agent_debug_ingest_log_json(
+               "metal.m:metal_frame",
+               "metal fast-path timing breakdown",
+               "H15",
+               "run6",
+               perfPayload.UTF8String
+         );
+         // #endregion
+         s_last_nonblock_perf_log = perf_now;
+         s_nonblock_perf_window_started_at = perf_now;
+         s_nonblock_perf_count = 0;
+         s_nonblock_render_total_ms = 0.0;
+         s_nonblock_render_max_ms = 0.0;
+         s_nonblock_swap_total_ms = 0.0;
+         s_nonblock_swap_max_ms = 0.0;
+      }
+   }
+#endif
 
    /* Frame duping for shader_subframes - present multiple times per core frame
     * to match high refresh rate displays (e.g., 60fps core on 120Hz display).
@@ -2455,6 +2529,33 @@ static void metal_set_nonblock_state(void *data, bool non_block,
    MetalDriver *md = (__bridge MetalDriver *)data;
    md.context.displaySyncEnabled = !non_block;
    metal_swap_interval = swap_interval;
+#if DEBUG
+   static int s_last_non_block = -1;
+   static int s_last_adaptive_vsync = -1;
+   static int s_last_swap_interval = -1;
+   if (s_last_non_block != (int)non_block
+         || s_last_adaptive_vsync != (int)adaptive_vsync_enabled
+         || s_last_swap_interval != (int)swap_interval)
+   {
+      // #region agent log
+      NSString *statePayload = [NSString stringWithFormat:
+         @"{\"nonBlock\":%s,\"adaptiveVsync\":%s,\"swapInterval\":%u}",
+         non_block ? "true" : "false",
+         adaptive_vsync_enabled ? "true" : "false",
+         swap_interval];
+      je_agent_debug_ingest_log_json(
+            "metal.m:metal_set_nonblock_state",
+            "metal nonblock state updated",
+            "H14",
+            "run6",
+            statePayload.UTF8String
+      );
+      // #endregion
+      s_last_non_block = (int)non_block;
+      s_last_adaptive_vsync = (int)adaptive_vsync_enabled;
+      s_last_swap_interval = (int)swap_interval;
+   }
+#endif
 }
 
 static bool metal_alive(void *data) { return true; }
