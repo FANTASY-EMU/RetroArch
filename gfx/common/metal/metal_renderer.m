@@ -16,6 +16,7 @@
 
 #include <retro_assert.h>
 
+#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 
@@ -42,6 +43,12 @@ static NSString *RPixelStrings[RPixelFormatCount];
 #if DEBUG
 bool je_metal_boundary_input_nonblock_state = false;
 
+bool joyemu_metal_trace_console_enabled(void)
+{
+   return [[NSUserDefaults standardUserDefaults]
+      boolForKey:@"JoyEMU.JoyEngine.MetalTraceConsoleEnabled"];
+}
+
 static void je_metal_renderer_log_console_trace(
    const char *location,
    const char *message,
@@ -49,6 +56,9 @@ static void je_metal_renderer_log_console_trace(
    const char *runId,
    NSString *payload)
 {
+   if (!joyemu_metal_trace_console_enabled())
+      return;
+
    NSString *trace = [NSString stringWithFormat:
       @"{\"hypothesisId\":\"%s\",\"runId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":%@}",
       hypothesisId ? hypothesisId : "",
@@ -69,6 +79,9 @@ static void je_metal_log_boundary(
    bool acquiredDrawable,
    double elapsedMs)
 {
+   if (!joyemu_metal_trace_console_enabled())
+      return;
+
    NSString *payload = [NSString stringWithFormat:
       @"{\"inputNonblock\":%s,\"hadCachedDrawable\":%s,\"acquiredDrawable\":%s,\"elapsedMs\":%.3f}",
       inputNonblock ? "true" : "false",
@@ -754,21 +767,25 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
    if (_rce == nil)
    {
 #if DEBUG
+      bool traceEnabled = joyemu_metal_trace_console_enabled();
       bool hadCachedDrawable = (_drawable != nil);
-      CFTimeInterval drawableStartedAt = CACurrentMediaTime();
+      CFTimeInterval drawableStartedAt = traceEnabled ? CACurrentMediaTime() : 0.0;
 #endif
       id<CAMetalDrawable> drawable = self.nextDrawable;
 #if DEBUG
-      double drawableElapsedMs = (CACurrentMediaTime() - drawableStartedAt) * 1000.0;
-      je_metal_log_boundary(
-            "metal_renderer.m:rce",
-            "metal drawable acquire boundary",
-            "H17",
-            "run7",
-            je_metal_boundary_input_nonblock_state,
-            hadCachedDrawable,
-            drawable != nil && drawable.texture != nil,
-            drawableElapsedMs);
+      if (traceEnabled)
+      {
+         double drawableElapsedMs = (CACurrentMediaTime() - drawableStartedAt) * 1000.0;
+         je_metal_log_boundary(
+               "metal_renderer.m:rce",
+               "metal drawable acquire boundary",
+               "H17",
+               "run7",
+               je_metal_boundary_input_nonblock_state,
+               hadCachedDrawable,
+               drawable != nil && drawable.texture != nil,
+               drawableElapsedMs);
+      }
 #endif
       if (!drawable || !drawable.texture)
       {
@@ -899,20 +916,22 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
     * in-flight), which naturally paces us to the display refresh rate.
     * This blocking behavior is intentional for proper frame pacing. */
 #if DEBUG
-   CFTimeInterval swapAcquireStartedAt = CACurrentMediaTime();
+   bool traceEnabled = joyemu_metal_trace_console_enabled();
+   CFTimeInterval swapAcquireStartedAt = traceEnabled ? CACurrentMediaTime() : 0.0;
 #endif
    _drawable = nil;
    _drawable = _layer.nextDrawable;
 #if DEBUG
-   je_metal_log_boundary(
-         "metal_renderer.m:swapBuffers",
-         "metal swap acquire boundary",
-         "H18",
-         "run7",
-         je_metal_boundary_input_nonblock_state,
-         false,
-         _drawable != nil && _drawable.texture != nil,
-         (CACurrentMediaTime() - swapAcquireStartedAt) * 1000.0);
+   if (traceEnabled)
+      je_metal_log_boundary(
+            "metal_renderer.m:swapBuffers",
+            "metal swap acquire boundary",
+            "H18",
+            "run7",
+            je_metal_boundary_input_nonblock_state,
+            false,
+            _drawable != nil && _drawable.texture != nil,
+            (CACurrentMediaTime() - swapAcquireStartedAt) * 1000.0);
 #endif
 }
 

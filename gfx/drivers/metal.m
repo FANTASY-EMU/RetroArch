@@ -70,6 +70,7 @@
 
 #if DEBUG
 extern bool je_metal_boundary_input_nonblock_state;
+extern bool joyemu_metal_trace_console_enabled(void);
 
 static void je_metal_driver_log_console_trace(
       const char *location,
@@ -78,6 +79,9 @@ static void je_metal_driver_log_console_trace(
       const char *runId,
       NSString *payload)
 {
+   if (!joyemu_metal_trace_console_enabled())
+      return;
+
    NSString *trace = [NSString stringWithFormat:
       @"{\"hypothesisId\":\"%s\",\"runId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":%@}",
       hypothesisId ? hypothesisId : "",
@@ -2406,9 +2410,8 @@ static bool metal_frame(void *data, const void *frame,
    MetalDriver *md = (__bridge MetalDriver *)data;
    bool track_nonblock = video_info && video_info->input_driver_nonblock_state;
 #if DEBUG
+   bool traceEnabled = joyemu_metal_trace_console_enabled();
    je_metal_boundary_input_nonblock_state = track_nonblock;
-#endif
-#if DEBUG
    static CFTimeInterval s_last_nonblock_perf_log = 0.0;
    static CFTimeInterval s_nonblock_perf_window_started_at = 0.0;
    static uint32_t s_nonblock_perf_count = 0;
@@ -2416,7 +2419,7 @@ static bool metal_frame(void *data, const void *frame,
    static double s_nonblock_render_max_ms = 0.0;
    static double s_nonblock_swap_total_ms = 0.0;
    static double s_nonblock_swap_max_ms = 0.0;
-   if (!track_nonblock)
+   if (!traceEnabled || !track_nonblock)
    {
       s_last_nonblock_perf_log = 0.0;
       s_nonblock_perf_window_started_at = 0.0;
@@ -2430,7 +2433,9 @@ static bool metal_frame(void *data, const void *frame,
       s_nonblock_perf_window_started_at = CACurrentMediaTime();
 #endif
 
-   CFTimeInterval render_started_at = CACurrentMediaTime();
+#if DEBUG
+   CFTimeInterval render_started_at = traceEnabled ? CACurrentMediaTime() : 0.0;
+#endif
 
    if (![md renderFrame:frame
                    data:data
@@ -2441,17 +2446,23 @@ static bool metal_frame(void *data, const void *frame,
                     msg:msg
                    info:video_info])
       return false;
+#if DEBUG
    double render_elapsed_ms = (CACurrentMediaTime() - render_started_at) * 1000.0;
+#endif
 
    /* Call swap_buffers to acquire next drawable. This moves the blocking
     * acquisition to AFTER presenting (like Vulkan), instead of BEFORE
     * rendering. This is critical for proper 120Hz on ProMotion displays. */
-   CFTimeInterval swap_started_at = CACurrentMediaTime();
+#if DEBUG
+   CFTimeInterval swap_started_at = traceEnabled ? CACurrentMediaTime() : 0.0;
+#endif
    metal_ctx_swap_buffers(NULL);
+#if DEBUG
    double swap_elapsed_ms = (CACurrentMediaTime() - swap_started_at) * 1000.0;
+#endif
 
 #if DEBUG
-   if (track_nonblock)
+   if (traceEnabled && track_nonblock)
    {
       s_nonblock_perf_count++;
       s_nonblock_render_total_ms += render_elapsed_ms;
@@ -2566,9 +2577,10 @@ static void metal_set_nonblock_state(void *data, bool non_block,
    static int s_last_non_block = -1;
    static int s_last_adaptive_vsync = -1;
    static int s_last_swap_interval = -1;
-   if (s_last_non_block != (int)non_block
+   if (joyemu_metal_trace_console_enabled()
+         && (s_last_non_block != (int)non_block
          || s_last_adaptive_vsync != (int)adaptive_vsync_enabled
-         || s_last_swap_interval != (int)swap_interval)
+         || s_last_swap_interval != (int)swap_interval))
    {
       // #region agent log
       NSString *statePayload = [NSString stringWithFormat:
