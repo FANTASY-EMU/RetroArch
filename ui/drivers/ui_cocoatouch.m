@@ -638,13 +638,25 @@ enum
 
    if ([type unsignedIntegerValue] == AVAudioSessionInterruptionTypeBegan)
    {
-      RARCH_DBG("[Cocoa] AudioSession Interruption Began.\n");
+      RARCH_LOG("[Cocoa] AudioSession Interruption Began.\n");
       audio_driver_stop();
+#ifdef HAVE_MICROPHONE
+      command_event(CMD_EVENT_MICROPHONE_STOP, NULL);
+#endif
    }
    else if ([type unsignedIntegerValue] == AVAudioSessionInterruptionTypeEnded)
    {
-      RARCH_DBG("[Cocoa] AudioSession Interruption Ended.\n");
-      audio_driver_start(false);
+      RARCH_LOG("[Cocoa] AudioSession Interruption Ended.\n");
+      NSError *error = nil;
+      [[AVAudioSession sharedInstance] setActive:YES error:&error];
+
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(), ^{
+#ifdef HAVE_MICROPHONE
+         command_event(CMD_EVENT_MICROPHONE_REINIT, NULL);
+#endif
+         command_event(CMD_EVENT_AUDIO_REINIT, NULL);
+      });
    }
 }
 
@@ -962,10 +974,18 @@ enum
    settings_t *settings            = config_get_ptr();
    bool ui_companion_start_on_boot = settings->bools.ui_companion_start_on_boot;
 
-   if (settings->bools.audio_respect_silent_mode)
-       [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient error:&error];
-   else
-       [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:&error];
+   {
+      AVAudioSessionCategoryOptions options =
+            AVAudioSessionCategoryOptionMixWithOthers
+          | AVAudioSessionCategoryOptionAllowBluetoothA2DP
+          | AVAudioSessionCategoryOptionAllowAirPlay;
+      if (settings->bools.audio_respect_silent_mode)
+         [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient
+                                          withOptions:options error:&error];
+      else
+         [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback
+                                          withOptions:options error:&error];
+   }
 
    if (!ui_companion_start_on_boot)
       [self showGameView];

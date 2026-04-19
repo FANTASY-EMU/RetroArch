@@ -20,6 +20,7 @@
 
 #include "audio/audio_driver.h"
 #include "../../verbosity.h"
+#include "../../configuration.h"
 
 typedef struct coreaudio_microphone
 {
@@ -32,7 +33,6 @@ typedef struct coreaudio_microphone
     bool use_float; /* Whether to use float format */
 } coreaudio_microphone_t;
 
-/* Callback for receiving audio samples */
 static OSStatus coreaudio_input_callback(
     void *inRefCon,
     AudioUnitRenderActionFlags *ioActionFlags,
@@ -41,51 +41,37 @@ static OSStatus coreaudio_input_callback(
     UInt32 inNumberFrames,
     AudioBufferList *ioData)
 {
-    OSStatus status;
-    AudioBufferList bufferList;
-    void *tempBuffer                   = NULL;
     coreaudio_microphone_t *microphone = (coreaudio_microphone_t*)inRefCon;
-    /* Calculate required buffer size */
-    size_t bufferSize = inNumberFrames * microphone->format.mBytesPerFrame;
+
+    UInt32 bufferSize = inNumberFrames * microphone->format.mBytesPerFrame;
     if (bufferSize == 0)
-    {
-       RARCH_ERR("[CoreAudio] Invalid buffer size calculation.\n");
-       return kAudio_ParamError;
+        return kAudio_ParamError;
+
+    uint8_t stackBuf[4096];
+    if (bufferSize > sizeof(stackBuf))
+        return kAudio_ParamError;
+
+    AudioBufferList bufferList;
+    bufferList.mNumberBuffers              = 1;
+    bufferList.mBuffers[0].mDataByteSize   = bufferSize;
+    bufferList.mBuffers[0].mData           = stackBuf;
+
+    OSStatus status = AudioUnitRender(microphone->audio_unit,
+                                      ioActionFlags,
+                                      inTimeStamp,
+                                      inBusNumber,
+                                      inNumberFrames,
+                                      &bufferList);
+
+    if (status == noErr) {
+        size_t writeAvail = FIFO_WRITE_AVAIL(microphone->sample_buffer);
+        size_t actual     = bufferList.mBuffers[0].mDataByteSize;
+        if (actual <= writeAvail)
+            fifo_write(microphone->sample_buffer,
+                       bufferList.mBuffers[0].mData, actual);
+
     }
 
-    /* Allocate temporary buffer */
-    tempBuffer = malloc(bufferSize);
-    if (!tempBuffer)
-    {
-       RARCH_ERR("[CoreAudio] Failed to allocate temporary buffer.\n");
-       return kAudio_MemFullError;
-    }
-
-    /* Set up buffer list */
-    bufferList.mNumberBuffers = 1;
-    bufferList.mBuffers[0].mDataByteSize = (UInt32)bufferSize;
-    bufferList.mBuffers[0].mData = tempBuffer;
-
-    /* Render audio data */
-    status = AudioUnitRender(microphone->audio_unit,
-                           ioActionFlags,
-                           inTimeStamp,
-                           inBusNumber,
-                           inNumberFrames,
-                           &bufferList);
-
-    /* Write to FIFO buffer */
-    if (status == noErr)
-        fifo_write(microphone->sample_buffer,
-                  bufferList.mBuffers[0].mData,
-                  bufferList.mBuffers[0].mDataByteSize);
-    else
-    {
-        RARCH_ERR("[CoreAudio] Failed to render audio: %d.\n", status);
-    }
-
-    /* Clean up temporary buffer */
-    free(tempBuffer);
     return status;
 }
 
@@ -133,9 +119,6 @@ static int coreaudio_microphone_read(void *driver_context,
    if (read_amt > 0)
    {
       fifo_read(microphone->sample_buffer, buf, read_amt);
-#if DEBUG
-      RARCH_LOG("[CoreAudio] Read %zu bytes from microphone.\n", read_amt);
-#endif
    }
 
    return (int)read_amt;
@@ -171,7 +154,6 @@ static void coreaudio_microphone_set_format(coreaudio_microphone_t *microphone, 
          microphone->format.mBytesPerFrame);
 }
 
-/* Open microphone device */
 static void *coreaudio_microphone_open_mic(void *driver_context,
       const char *device,
       unsigned rate,
@@ -180,8 +162,6 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
 {
    (void)driver_context;
 
-   /* Allocate a fresh mic handle — this is a DIFFERENT allocation from the
-    * driver context so close_mic can free it without affecting driver state. */
    coreaudio_microphone_t *microphone =
          (coreaudio_microphone_t*)calloc(1, sizeof(*microphone));
    if (!microphone)
@@ -190,33 +170,16 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
       return NULL;
    }
 
-   microphone->sample_rate = rate;
-   microphone->use_float   = false; /* Default to integer format */
+   microphone->use_float = false;
 
-   /* Validate requested sample rate */
    if (rate != 44100 && rate != 48000)
    {
       RARCH_WARN("[CoreAudio] Requested sample rate %u not supported, defaulting to 48000.\n", rate);
       rate = 48000;
    }
+   microphone->sample_rate = rate;
 
 #if TARGET_OS_IPHONE
-   /* Configure audio session.
-    *
-    * REGRESSION FIX (Skin-ODR merge, joyengine-ra-integration):
-    * The bare `setCategory:PlayAndRecord error:` call (no options) was a
-    * destructive override of JoyEngine's session policy. With no options,
-    * iOS drops MixWithOthers *and* routes output to the Receiver (earpiece)
-    * instead of the main speaker, producing the "game audio is very quiet"
-    * symptom once the microphone is opened (melonDS "blow" gesture, etc.).
-    *
-    * `coreaudio_mic_macos.m` does not touch the session at all — only the
-    * iOS driver did. Fix: keep PlayAndRecord (needed to open an input bus)
-    * but preserve the options JEAudioSession already established and add
-    * DefaultToSpeaker so output stays on the loud speaker. MixWithOthers
-    * keeps us friendly with other foreground audio; AllowBluetoothA2DP and
-    * AllowAirPlay keep external outputs working; DefaultToSpeaker is the
-    * one that blocks the silent Receiver fallback. */
    AVAudioSession *audioSession = [AVAudioSession sharedInstance];
    NSError *error = nil;
    [audioSession setCategory:AVAudioSessionCategoryPlayAndRecord
@@ -227,33 +190,42 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
                        error:&error];
    if (error)
    {
-      RARCH_ERR("[CoreAudio] Failed to set audio session category: %s.\n", [[error localizedDescription] UTF8String]);
+      RARCH_ERR("[CoreAudio] Failed to set audio session category: %s.\n",
+                [[error localizedDescription] UTF8String]);
       free(microphone);
       return NULL;
    }
 
-   /* setCategory: resets allowHapticsAndSystemSoundsDuringRecording to NO.
-    * Without re-enabling it, UIImpactFeedbackGenerator (skin button haptics)
-    * is silently suppressed for the entire PlayAndRecord session. */
+   [audioSession setActive:YES error:&error];
+   if (error)
+   {
+      RARCH_ERR("[CoreAudio] Failed to activate audio session: %s.\n",
+                [[error localizedDescription] UTF8String]);
+      free(microphone);
+      return NULL;
+   }
+   RARCH_LOG("[CoreAudio] Audio session activated (PlayAndRecord).\n");
+
    if (@available(iOS 13.0, *)) {
-      BOOL ok = [audioSession setAllowHapticsAndSystemSoundsDuringRecording:YES error:&error];
-      if (!ok || error) {
-         RARCH_WARN("[CoreAudio] Failed to allow haptics during recording: %s\n",
-                    error ? [[error localizedDescription] UTF8String] : "unknown");
-         error = nil;
+      if ([audioSession respondsToSelector:@selector(setAllowHapticsAndSystemSoundsDuringRecording:error:)]) {
+         BOOL ok = [audioSession setAllowHapticsAndSystemSoundsDuringRecording:YES error:&error];
+         if (!ok || error) {
+            RARCH_WARN("[CoreAudio] Failed to allow haptics during recording: %s\n",
+                       error ? [[error localizedDescription] UTF8String] : "unknown");
+            error = nil;
+         }
       }
    }
 
-   /*/ Set preferred sample rate */
    [audioSession setPreferredSampleRate:rate error:&error];
    if (error)
    {
-      RARCH_ERR("[CoreAudio] Failed to set preferred sample rate: %s.\n", [[error localizedDescription] UTF8String]);
+      RARCH_ERR("[CoreAudio] Failed to set preferred sample rate: %s.\n",
+                [[error localizedDescription] UTF8String]);
       free(microphone);
       return NULL;
    }
 
-   /* Get actual sample rate */
    Float64 actualRate = [audioSession sampleRate];
    if (new_rate)
       *new_rate = (unsigned)actualRate;
@@ -264,21 +236,18 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
 
 #endif
 
-   /* Set format using helper method */
-   coreaudio_microphone_set_format(microphone, false); /* Default to 16-bit integer */
+   coreaudio_microphone_set_format(microphone, false);
 
-   /* Calculate FIFO buffer size */
    size_t fifoBufferSize = (latency * microphone->sample_rate * microphone->format.mBytesPerFrame) / 1000;
    if (fifoBufferSize == 0)
    {
       RARCH_WARN("[CoreAudio] Calculated FIFO buffer size is 0 for latency: %u, sample_rate: %d, bytes_per_frame: %d.\n",
             latency, microphone->sample_rate, microphone->format.mBytesPerFrame);
-      fifoBufferSize = 1024; /* Default to a reasonable buffer size */
+      fifoBufferSize = 1024;
    }
 
    RARCH_LOG("[CoreAudio] FIFO buffer size: %zu bytes.\n", fifoBufferSize);
 
-   /* Create sample buffer */
    microphone->sample_buffer = fifo_new(fifoBufferSize);
    if (!microphone->sample_buffer)
    {
@@ -287,7 +256,6 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
       return NULL;
    }
 
-   /* Initialize audio unit */
    AudioComponentDescription desc = {
       .componentType = kAudioUnitType_Output,
 #if TARGET_OS_IPHONE
@@ -308,12 +276,11 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
       goto error;
    }
 
-   /* Enable input */
    UInt32 flag = 1;
    status = AudioUnitSetProperty(microphone->audio_unit,
          kAudioOutputUnitProperty_EnableIO,
          kAudioUnitScope_Input,
-         1, /* Input bus */
+         1,
          &flag,
          sizeof(flag));
    if (status != noErr)
@@ -322,12 +289,10 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
       goto error;
    }
 
-   /* Set format using helper method */
-   coreaudio_microphone_set_format(microphone, false); /* Default to 16-bit integer */
    status = AudioUnitSetProperty(microphone->audio_unit,
          kAudioUnitProperty_StreamFormat,
          kAudioUnitScope_Output,
-         1, /* Input bus */
+         1,
          &microphone->format,
          sizeof(microphone->format));
    if (status != noErr)
@@ -336,12 +301,11 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
       goto error;
    }
 
-   /* Set callback */
    AURenderCallbackStruct callback = { coreaudio_input_callback, microphone };
    status = AudioUnitSetProperty(microphone->audio_unit,
          kAudioOutputUnitProperty_SetInputCallback,
          kAudioUnitScope_Global,
-         1, /* Input bus */
+         1,
          &callback,
          sizeof(callback));
    if (status != noErr)
@@ -350,7 +314,6 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
       goto error;
    }
 
-   /* Initialize audio unit */
    status = AudioUnitInitialize(microphone->audio_unit);
    if (status != noErr)
    {
@@ -358,13 +321,8 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
       goto error;
    }
 
-   /* Start audio unit */
-   status = AudioOutputUnitStart(microphone->audio_unit);
-   if (status != noErr)
-   {
-      RARCH_ERR("[CoreAudio] Failed to start audio unit: %d.\n", status);
-      goto error;
-   }
+   microphone->is_running = false;
+   RARCH_LOG("[CoreAudio] Microphone opened successfully (idle, waiting for start_mic).\n");
 
    return microphone;
 
@@ -376,51 +334,103 @@ error:
          AudioComponentInstanceDispose(microphone->audio_unit);
          microphone->audio_unit = nil;
       }
+      if (microphone->sample_buffer)
+      {
+         fifo_free(microphone->sample_buffer);
+         microphone->sample_buffer = NULL;
+      }
       free(microphone);
    }
    return NULL;
 }
 
-/* Close microphone */
 static void coreaudio_microphone_close_mic(void *driver_context, void *microphone_context)
 {
    coreaudio_microphone_t *microphone = (coreaudio_microphone_t*)microphone_context;
    if (microphone)
    {
-      if (microphone->is_running)
-         AudioOutputUnitStop(microphone->audio_unit);
-
       if (microphone->audio_unit)
       {
+         AudioOutputUnitStop(microphone->audio_unit);
          AudioComponentInstanceDispose(microphone->audio_unit);
          microphone->audio_unit = nil;
       }
+      microphone->is_running = false;
       if (microphone->sample_buffer)
          fifo_free(microphone->sample_buffer);
       free(microphone);
+      RARCH_LOG("[CoreAudio] Microphone closed.\n");
    }
    else
    {
-      RARCH_ERR("[CoreAudio] Failed to close microphone.\n");
+      RARCH_ERR("[CoreAudio] Failed to close microphone (null context).\n");
    }
+
+#if TARGET_OS_IPHONE
+   AVAudioSessionCategoryOptions options =
+         AVAudioSessionCategoryOptionMixWithOthers
+       | AVAudioSessionCategoryOptionAllowBluetoothA2DP
+       | AVAudioSessionCategoryOptionAllowAirPlay;
+   settings_t *settings = config_get_ptr();
+   if (settings && settings->bools.audio_respect_silent_mode)
+      [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient
+                                       withOptions:options error:nil];
+   else
+      [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback
+                                       withOptions:options error:nil];
+#endif
 }
 
-/* Start microphone */
 static bool coreaudio_microphone_start_mic(void *driver_context, void *microphone_context)
 {
-   RARCH_LOG("[CoreAudio] Starting microphone.\n");
    coreaudio_microphone_t *microphone = (coreaudio_microphone_t*)microphone_context;
-   if (!microphone)
+
+   if (!microphone || !microphone->audio_unit)
    {
-      RARCH_ERR("[CoreAudio] Failed to start microphone.\n");
+      RARCH_ERR("[CoreAudio] Failed to start microphone (null context or audio_unit).\n");
       return false;
    }
-   RARCH_LOG("[CoreAudio] Starting audio unit...\n");
+
+#if TARGET_OS_IPHONE
+   AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+   if (![audioSession.category isEqualToString:AVAudioSessionCategoryPlayAndRecord])
+   {
+      NSError *error = nil;
+      [audioSession setCategory:AVAudioSessionCategoryPlayAndRecord
+                    withOptions:AVAudioSessionCategoryOptionMixWithOthers
+                              | AVAudioSessionCategoryOptionAllowBluetoothA2DP
+                              | AVAudioSessionCategoryOptionAllowAirPlay
+                              | AVAudioSessionCategoryOptionDefaultToSpeaker
+                          error:&error];
+      if (error)
+         RARCH_WARN("[CoreAudio] start_mic: failed to re-set PlayAndRecord: %s.\n",
+                    [[error localizedDescription] UTF8String]);
+
+      [audioSession setActive:YES error:&error];
+      if (error)
+         RARCH_WARN("[CoreAudio] start_mic: failed to re-activate session: %s.\n",
+                    [[error localizedDescription] UTF8String]);
+
+      if (@available(iOS 13.0, *)) {
+         if ([audioSession respondsToSelector:@selector(setAllowHapticsAndSystemSoundsDuringRecording:error:)]) {
+            error = nil;
+            BOOL ok = [audioSession setAllowHapticsAndSystemSoundsDuringRecording:YES error:&error];
+            if (!ok || error)
+               RARCH_WARN("[CoreAudio] start_mic: failed to re-allow haptics: %s.\n",
+                          error ? [[error localizedDescription] UTF8String] : "unknown");
+         }
+      }
+
+      RARCH_LOG("[CoreAudio] start_mic: reconfigured session to PlayAndRecord.\n");
+   }
+#endif
+
+   if (microphone->sample_buffer)
+      fifo_clear(microphone->sample_buffer);
 
    OSStatus status = AudioOutputUnitStart(microphone->audio_unit);
    if (status == noErr)
    {
-      RARCH_LOG("[CoreAudio] Audio unit started successfully.\n");
       microphone->is_running = true;
       return true;
    }
