@@ -117,6 +117,7 @@
 #include "location_driver.h"
 
 #include "runloop.h"
+#include "runloop_speed_test_debug.h"
 #include "camera/camera_driver.h"
 #include "location_driver.h"
 #include "record/record_driver.h"
@@ -1481,15 +1482,17 @@ void driver_set_nonblock_state(void)
    bool video_driver_active    = (video_st->flags  & VIDEO_FLAG_ACTIVE) ? true : false;
    bool audio_driver_active    = (audio_st->flags  & AUDIO_FLAG_ACTIVE) ? true : false;
    bool runloop_force_nonblock = (runloop_st->flags & RUNLOOP_FLAG_FORCE_NONBLOCK) ? true : false;
+   bool video_nonblock         = enable;
+   bool audio_nonblock         = audio_sync ? enable : true;
+
+   if (!video_vsync || runloop_force_nonblock)
+      video_nonblock = true;
 
    /* Only apply non-block-state for video if we're using vsync. */
    if (video_driver_active && VIDEO_DRIVER_GET_PTR_INTERNAL(video_st))
    {
       if (video_st->current_video->set_nonblock_state)
       {
-         bool video_nonblock        = enable;
-         if (!video_vsync || runloop_force_nonblock)
-            video_nonblock = true;
          video_st->current_video->set_nonblock_state(video_st->data,
                video_nonblock,
                video_driver_test_all_flags(GFX_CTX_FLAGS_ADAPTIVE_VSYNC)
@@ -1500,11 +1503,52 @@ void driver_set_nonblock_state(void)
    if (audio_driver_active && audio_st->context_audio_data)
       audio_st->current_audio->set_nonblock_state(
             audio_st->context_audio_data,
-            audio_sync ? enable : true);
+            audio_nonblock);
 
    audio_st->chunk_size = enable
       ? audio_st->chunk_nonblock_size
       : audio_st->chunk_block_size;
+
+#if DEBUG
+   if (joyemu_runloop_fastforward_trace_enabled())
+   {
+      static int s_last_input_nonblock = -1;
+      static int s_last_video_nonblock = -1;
+      static int s_last_audio_nonblock = -1;
+      static int s_last_force_nonblock = -1;
+      static unsigned s_last_swap_interval = 0;
+      static bool s_has_logged = false;
+
+      if (!s_has_logged
+            || s_last_input_nonblock != (int)enable
+            || s_last_video_nonblock != (int)video_nonblock
+            || s_last_audio_nonblock != (int)audio_nonblock
+            || s_last_force_nonblock != (int)runloop_force_nonblock
+            || s_last_swap_interval != swap_interval)
+      {
+         JOYEMU_FFTRACE_LOG(
+               "[JoyEMU FFTrace] nonblock input=%d video=%d audio=%d "
+               "swapInterval=%u audioSync=%d videoVSync=%d force=%d "
+               "frameLimitUs=%lld flags=0x%08x\n",
+               enable ? 1 : 0,
+               video_nonblock ? 1 : 0,
+               audio_nonblock ? 1 : 0,
+               swap_interval,
+               audio_sync ? 1 : 0,
+               video_vsync ? 1 : 0,
+               runloop_force_nonblock ? 1 : 0,
+               (long long)runloop_st->frame_limit_minimum_time,
+               (unsigned)runloop_st->flags);
+
+         s_last_input_nonblock = (int)enable;
+         s_last_video_nonblock = (int)video_nonblock;
+         s_last_audio_nonblock = (int)audio_nonblock;
+         s_last_force_nonblock = (int)runloop_force_nonblock;
+         s_last_swap_interval = swap_interval;
+         s_has_logged = true;
+      }
+   }
+#endif
 }
 
 void drivers_init(

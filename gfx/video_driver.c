@@ -3886,6 +3886,7 @@ void video_driver_frame(const void *data, unsigned width,
       unsigned fps_update_interval              = video_info.fps_update_interval;
       unsigned memory_update_interval           = video_info.memory_update_interval;
       /* set this to 1 to avoid an offset issue */
+      /* JoyEMU: keep frame_time_count for frame pacing diagnostics and future FPS UI. */
       unsigned write_index                      = video_st->frame_time_count++
                                                & (MEASURE_FRAME_TIME_SAMPLES_COUNT - 1);
       frame_time                                = new_time - fps_time;
