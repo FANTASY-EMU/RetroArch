@@ -371,9 +371,12 @@ void je_speed_test_set_rotation_suppressed(bool suppressed)
 
 bool joyemu_runloop_should_reset_frame_limit_timestamp_after_fastforward(
       bool was_fastmotion,
-      bool is_fastmotion)
+      bool is_fastmotion,
+      float previous_ratio,
+      float next_ratio)
 {
-   return was_fastmotion && !is_fastmotion;
+   return (was_fastmotion && !is_fastmotion)
+         || (was_fastmotion && is_fastmotion && fabsf(previous_ratio - next_ratio) > 0.001f);
 }
 
 bool joyemu_runloop_should_log_core_message(unsigned target)
@@ -4263,8 +4266,15 @@ static void runloop_apply_fastmotion_override(runloop_state_t *runloop_st,
          &runloop_st->fastmotion_override.next,
          sizeof(runloop_st->fastmotion_override.current));
 
+   fastforward_ratio_current = (runloop_st->fastmotion_override.current.fastforward
+         && (runloop_st->fastmotion_override.current.ratio >= 0.0f)) ?
+               runloop_st->fastmotion_override.current.ratio :
+                     fastforward_ratio_default;
+
    /* Check if 'fastmotion' state has changed */
-   if (((runloop_st->flags & RUNLOOP_FLAG_FASTMOTION) > 0) !=
+   bool was_fastmotion = (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION) != 0;
+
+   if (was_fastmotion !=
          runloop_st->fastmotion_override.current.fastforward)
    {
       input_driver_state_t *input_st = input_state_get_ptr();
@@ -4308,15 +4318,16 @@ static void runloop_apply_fastmotion_override(runloop_state_t *runloop_st,
 #endif
    }
 
-   /* Update frame limit, if required */
-   fastforward_ratio_current = (runloop_st->fastmotion_override.current.fastforward
-         && (runloop_st->fastmotion_override.current.ratio >= 0.0f)) ?
-               runloop_st->fastmotion_override.current.ratio :
-                     fastforward_ratio_default;
-
    if (fastforward_ratio_current != fastforward_ratio_last)
       runloop_set_frame_limit(&video_st->av_info,
             fastforward_ratio_current);
+
+   if (joyemu_runloop_should_reset_frame_limit_timestamp_after_fastforward(
+            was_fastmotion,
+            (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION) != 0,
+            fastforward_ratio_last,
+            fastforward_ratio_current))
+      runloop_st->frame_limit_last_time = cpu_features_get_time_usec();
 }
 
 void runloop_event_deinit_core(void)
@@ -4712,6 +4723,41 @@ void runloop_set_frame_limit(
       runloop_st->frame_limit_minimum_time = (retro_time_t)
          roundf(1000000.0f /
                (av_info->timing.fps * fastforward_ratio));
+
+#if DEBUG
+   if (joyemu_runloop_fastforward_trace_enabled())
+   {
+      static bool s_has_logged = false;
+      static float s_last_ratio = 0.0f;
+      static retro_time_t s_last_minimum_time = 0;
+
+      if (!s_has_logged
+            || fabsf(s_last_ratio - fastforward_ratio) > 0.001f
+            || s_last_minimum_time != runloop_st->frame_limit_minimum_time)
+      {
+         settings_t *settings = config_get_ptr();
+         struct retro_fastforwarding_override *override =
+               &runloop_st->fastmotion_override.current;
+
+         JOYEMU_FFTRACE_LOG(
+               "[JoyEMU FFTrace] frameLimit ratio=%.3f minUs=%lld fps=%.3f "
+               "settingsRatio=%.3f override(ff=%d ratio=%.3f pending=%d) "
+               "flags=0x%08x\n",
+               fastforward_ratio,
+               (long long)runloop_st->frame_limit_minimum_time,
+               av_info ? av_info->timing.fps : 0.0,
+               settings ? settings->floats.fastforward_ratio : 0.0f,
+               override->fastforward ? 1 : 0,
+               override->ratio,
+               runloop_st->fastmotion_override.pending ? 1 : 0,
+               (unsigned)runloop_st->flags);
+
+         s_last_ratio = fastforward_ratio;
+         s_last_minimum_time = runloop_st->frame_limit_minimum_time;
+         s_has_logged = true;
+      }
+   }
+#endif
 }
 
 float runloop_get_fastforward_ratio(
@@ -6997,6 +7043,7 @@ static enum runloop_state_enum runloop_check_state(
       {
          bool audio_fastforward_mute = settings->bools.audio_fastforward_mute;
          bool frame_time_counter_reset_after_ffwd = settings->bools.frame_time_counter_reset_after_fastforwarding;
+         bool was_fastmotion = (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION) != 0;
          if (input_st->flags & INP_FLAG_NONBLOCKING)
          {
             input_st->flags                     &= ~INP_FLAG_NONBLOCKING;
@@ -7022,6 +7069,15 @@ static enum runloop_state_enum runloop_check_state(
          if ( !(runloop_st->flags & RUNLOOP_FLAG_FASTMOTION)
              && frame_time_counter_reset_after_ffwd)
             video_st->frame_time_count  = 0;
+
+         if (joyemu_runloop_should_reset_frame_limit_timestamp_after_fastforward(
+                  was_fastmotion,
+                  (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION) != 0,
+                  settings->floats.fastforward_ratio,
+                  (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION)
+                     ? settings->floats.fastforward_ratio
+                     : 1.0f))
+            runloop_st->frame_limit_last_time = cpu_features_get_time_usec();
       }
 
       old_button_state                  = new_button_state;
@@ -7736,6 +7792,43 @@ end:
          runloop_set_frame_limit(&video_st->av_info, 1.0f);
    }
 
+#if DEBUG
+   if (joyemu_runloop_fastforward_trace_enabled())
+   {
+      static retro_time_t s_last_fastforward_status_log = 0;
+
+      if (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION)
+      {
+         if (!s_last_fastforward_status_log
+               || (current_time - s_last_fastforward_status_log) >= 500000)
+         {
+            float active_ratio = runloop_get_fastforward_ratio(
+                  settings, &runloop_st->fastmotion_override.current);
+            bool input_nonblock =
+                  input_st && (input_st->flags & INP_FLAG_NONBLOCKING);
+
+            JOYEMU_FFTRACE_LOG(
+                  "[JoyEMU FFTrace] iterate ratio=%.3f minUs=%lld lastUs=%lld "
+                  "inputNonblock=%d chunk=%zu frameTimeCount=%llu "
+                  "override(ff=%d ratio=%.3f pending=%d) flags=0x%08x\n",
+                  active_ratio,
+                  (long long)runloop_st->frame_limit_minimum_time,
+                  (long long)runloop_st->frame_limit_last_time,
+                  input_nonblock ? 1 : 0,
+                  audio_st ? audio_st->chunk_size : 0u,
+                  video_st ? (unsigned long long)video_st->frame_time_count : 0ULL,
+                  runloop_st->fastmotion_override.current.fastforward ? 1 : 0,
+                  runloop_st->fastmotion_override.current.ratio,
+                  runloop_st->fastmotion_override.pending ? 1 : 0,
+                  (unsigned)runloop_st->flags);
+            s_last_fastforward_status_log = current_time;
+         }
+      }
+      else
+         s_last_fastforward_status_log = 0;
+   }
+#endif
+
    /* if there's a fast forward limit, inject sleeps to keep from going too fast. */
    if (   (runloop_st->frame_limit_minimum_time)
           && (   (vrr_runloop_enable)
@@ -7747,10 +7840,36 @@ end:
               || (runloop_st->flags & RUNLOOP_FLAG_PAUSED)))
    {
       const retro_time_t end_frame_time  = cpu_features_get_time_usec();
-      const retro_time_t to_sleep_ms     = (
-            (  runloop_st->frame_limit_last_time
+      const retro_time_t ahead_usec      =
+            (runloop_st->frame_limit_last_time
              + runloop_st->frame_limit_minimum_time)
-            - end_frame_time) / 1000;
+            - end_frame_time;
+      const retro_time_t to_sleep_ms     = (
+            ahead_usec) / 1000;
+
+#if DEBUG
+      if (joyemu_runloop_fastforward_trace_enabled()
+            && (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION))
+      {
+         static retro_time_t s_last_fastforward_sleep_log = 0;
+
+         if (!s_last_fastforward_sleep_log
+               || (end_frame_time - s_last_fastforward_sleep_log) >= 500000)
+         {
+            JOYEMU_FFTRACE_LOG(
+                  "[JoyEMU FFTrace] limiter ratio=%.3f aheadUs=%lld toSleepMs=%lld "
+                  "minUs=%lld lastUs=%lld endUs=%lld\n",
+                  runloop_get_fastforward_ratio(
+                        settings, &runloop_st->fastmotion_override.current),
+                  (long long)ahead_usec,
+                  (long long)to_sleep_ms,
+                  (long long)runloop_st->frame_limit_minimum_time,
+                  (long long)runloop_st->frame_limit_last_time,
+                  (long long)end_frame_time);
+            s_last_fastforward_sleep_log = end_frame_time;
+         }
+      }
+#endif
 
       if (to_sleep_ms > 0)
       {
