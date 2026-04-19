@@ -5712,10 +5712,7 @@ void runloop_msg_queue_push(
       enum message_queue_category category)
 {
    if (!joyemu_runloop_should_display_core_message_on_osd(0))
-   {
-      RARCH_LOG("[JoyEMU OSD suppressed]: %s\n", msg ? msg : "(null)");
       return;
-   }
 #if defined(HAVE_GFX_WIDGETS)
    dispgfx_widget_t *p_dispwidget = dispwidget_get_ptr();
    bool widgets_active            = p_dispwidget->active;
