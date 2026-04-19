@@ -232,6 +232,18 @@ static void *coreaudio_microphone_open_mic(void *driver_context,
       return NULL;
    }
 
+   /* setCategory: resets allowHapticsAndSystemSoundsDuringRecording to NO.
+    * Without re-enabling it, UIImpactFeedbackGenerator (skin button haptics)
+    * is silently suppressed for the entire PlayAndRecord session. */
+   if (@available(iOS 13.0, *)) {
+      BOOL ok = [audioSession setAllowHapticsAndSystemSoundsDuringRecording:YES error:&error];
+      if (!ok || error) {
+         RARCH_WARN("[CoreAudio] Failed to allow haptics during recording: %s\n",
+                    error ? [[error localizedDescription] UTF8String] : "unknown");
+         error = nil;
+      }
+   }
+
    /*/ Set preferred sample rate */
    [audioSession setPreferredSampleRate:rate error:&error];
    if (error)
