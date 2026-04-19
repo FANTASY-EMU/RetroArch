@@ -22,6 +22,10 @@
 #import "metal_common.h"
 #import "metal_shader_types.h"
 
+#if DEBUG
+#import "../../../../../JoyEngine/Adapter/JEAdapter.h"
+#endif
+
 #ifdef HAVE_MENU
 #include "../../../menu/menu_driver.h"
 #endif
@@ -34,6 +38,47 @@
  */
 
 static NSString *RPixelStrings[RPixelFormatCount];
+
+#if DEBUG
+bool je_metal_boundary_input_nonblock_state = false;
+
+static void je_metal_renderer_log_console_trace(
+   const char *location,
+   const char *message,
+   const char *hypothesisId,
+   const char *runId,
+   NSString *payload)
+{
+   NSString *trace = [NSString stringWithFormat:
+      @"{\"hypothesisId\":\"%s\",\"runId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":%@}",
+      hypothesisId ? hypothesisId : "",
+      runId ? runId : "",
+      location ? location : "",
+      message ? message : "",
+      payload ?: @"{}"];
+   NSLog(@"[JEMetalTrace] %@", trace);
+}
+
+static void je_metal_log_boundary(
+   const char *location,
+   const char *message,
+   const char *hypothesisId,
+   const char *runId,
+   bool inputNonblock,
+   bool hadCachedDrawable,
+   bool acquiredDrawable,
+   double elapsedMs)
+{
+   NSString *payload = [NSString stringWithFormat:
+      @"{\"inputNonblock\":%s,\"hadCachedDrawable\":%s,\"acquiredDrawable\":%s,\"elapsedMs\":%.3f}",
+      inputNonblock ? "true" : "false",
+      hadCachedDrawable ? "true" : "false",
+      acquiredDrawable ? "true" : "false",
+      elapsedMs];
+   je_agent_debug_ingest_log_json(location, message, hypothesisId, runId, payload.UTF8String);
+   je_metal_renderer_log_console_trace(location, message, hypothesisId, runId, payload);
+}
+#endif
 
 NSUInteger RPixelFormatToBPP(RPixelFormat format)
 {
@@ -708,7 +753,23 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
    }
    if (_rce == nil)
    {
+#if DEBUG
+      bool hadCachedDrawable = (_drawable != nil);
+      CFTimeInterval drawableStartedAt = CACurrentMediaTime();
+#endif
       id<CAMetalDrawable> drawable = self.nextDrawable;
+#if DEBUG
+      double drawableElapsedMs = (CACurrentMediaTime() - drawableStartedAt) * 1000.0;
+      je_metal_log_boundary(
+            "metal_renderer.m:rce",
+            "metal drawable acquire boundary",
+            "H17",
+            "run7",
+            je_metal_boundary_input_nonblock_state,
+            hadCachedDrawable,
+            drawable != nil && drawable.texture != nil,
+            drawableElapsedMs);
+#endif
       if (!drawable || !drawable.texture)
       {
          RARCH_WARN("[Metal] Failed to acquire drawable - frame dropped\n");
@@ -837,8 +898,22 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
     * nextDrawable will block if no drawable is available (all 3 are
     * in-flight), which naturally paces us to the display refresh rate.
     * This blocking behavior is intentional for proper frame pacing. */
+#if DEBUG
+   CFTimeInterval swapAcquireStartedAt = CACurrentMediaTime();
+#endif
    _drawable = nil;
    _drawable = _layer.nextDrawable;
+#if DEBUG
+   je_metal_log_boundary(
+         "metal_renderer.m:swapBuffers",
+         "metal swap acquire boundary",
+         "H18",
+         "run7",
+         je_metal_boundary_input_nonblock_state,
+         false,
+         _drawable != nil && _drawable.texture != nil,
+         (CACurrentMediaTime() - swapAcquireStartedAt) * 1000.0);
+#endif
 }
 
 - (bool)allocRange:(BufferRange *)range length:(NSUInteger)length

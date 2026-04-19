@@ -68,6 +68,27 @@
 #include "../../ui/drivers/cocoa/cocoa_common.h"
 #include "../../../../JoyEngine/Adapter/JEAdapter.h"
 
+#if DEBUG
+extern bool je_metal_boundary_input_nonblock_state;
+
+static void je_metal_driver_log_console_trace(
+      const char *location,
+      const char *message,
+      const char *hypothesisId,
+      const char *runId,
+      NSString *payload)
+{
+   NSString *trace = [NSString stringWithFormat:
+      @"{\"hypothesisId\":\"%s\",\"runId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":%@}",
+      hypothesisId ? hypothesisId : "",
+      runId ? runId : "",
+      location ? location : "",
+      message ? message : "",
+      payload ?: @"{}"];
+   NSLog(@"[JEMetalTrace] %@", trace);
+}
+#endif
+
 #define STRUCT_ASSIGN(x, y) \
 { \
    NSObject * __y = y; \
@@ -2385,6 +2406,9 @@ static bool metal_frame(void *data, const void *frame,
    MetalDriver *md = (__bridge MetalDriver *)data;
    bool track_nonblock = video_info && video_info->input_driver_nonblock_state;
 #if DEBUG
+   je_metal_boundary_input_nonblock_state = track_nonblock;
+#endif
+#if DEBUG
    static CFTimeInterval s_last_nonblock_perf_log = 0.0;
    static CFTimeInterval s_nonblock_perf_window_started_at = 0.0;
    static uint32_t s_nonblock_perf_count = 0;
@@ -2442,7 +2466,7 @@ static bool metal_frame(void *data, const void *frame,
       {
          // #region agent log
          NSString *perfPayload = [NSString stringWithFormat:
-            @"{\"windowMs\":%.3f,\"count\":%u,\"frameCount\":%llu,\"renderAvgMs\":%.3f,\"renderMaxMs\":%.3f,\"swapAvgMs\":%.3f,\"swapMaxMs\":%.3f,\"swapInterval\":%u,\"shaderSubframes\":%u,\"inputNonblock\":%s}",
+            @"{\"windowMs\":%.3f,\"count\":%u,\"frameCount\":%llu,\"renderAvgMs\":%.3f,\"renderMaxMs\":%.3f,\"swapAvgMs\":%.3f,\"swapMaxMs\":%.3f,\"swapInterval\":%u,\"shaderSubframes\":%u,\"inputNonblock\":%s,\"boundaryRunId\":\"run7\"}",
             (perf_now - s_nonblock_perf_window_started_at) * 1000.0,
             s_nonblock_perf_count,
             (unsigned long long)frame_count,
@@ -2460,6 +2484,12 @@ static bool metal_frame(void *data, const void *frame,
                "run6",
                perfPayload.UTF8String
          );
+         je_metal_driver_log_console_trace(
+               "metal.m:metal_frame",
+               "metal fast-path timing breakdown",
+               "H15",
+               "run6",
+               perfPayload);
          // #endregion
          s_last_nonblock_perf_log = perf_now;
          s_nonblock_perf_window_started_at = perf_now;
@@ -2530,6 +2560,9 @@ static void metal_set_nonblock_state(void *data, bool non_block,
    md.context.displaySyncEnabled = !non_block;
    metal_swap_interval = swap_interval;
 #if DEBUG
+   je_metal_boundary_input_nonblock_state = non_block;
+#endif
+#if DEBUG
    static int s_last_non_block = -1;
    static int s_last_adaptive_vsync = -1;
    static int s_last_swap_interval = -1;
@@ -2550,6 +2583,12 @@ static void metal_set_nonblock_state(void *data, bool non_block,
             "run6",
             statePayload.UTF8String
       );
+      je_metal_driver_log_console_trace(
+            "metal.m:metal_set_nonblock_state",
+            "metal nonblock state updated",
+            "H14",
+            "run6",
+            statePayload);
       // #endregion
       s_last_non_block = (int)non_block;
       s_last_adaptive_vsync = (int)adaptive_vsync_enabled;
