@@ -1669,6 +1669,16 @@ bool runloop_environment_cb(unsigned cmd, void *data)
                break;
             }
 
+            /* Defensive fallback: the primary layout path now uses
+               MelonDSDSSetCustomLayout (dylib), but cores loaded via
+               nds.framework (legacy) still read this core option. */
+            if (g_melonds_custom_layout && string_is_equal(var->key, "melonds_custom_layout_config"))
+            {
+               var->value = g_melonds_custom_layout;
+               RARCH_LOG("[JoyEMU-MelonDS] GET_VARIABLE override: melonds_custom_layout_config = %s\n", var->value);
+               break;
+            }
+
             if (core_option_manager_get_idx(runloop_st->core_options,
                   var->key, &opt_idx))
                var->value = core_option_manager_get_val(
