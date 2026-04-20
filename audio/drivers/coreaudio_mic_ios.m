@@ -391,6 +391,9 @@ static bool coreaudio_microphone_start_mic(void *driver_context, void *microphon
       return false;
    }
 
+   if (microphone->is_running)
+      return true;
+
 #if TARGET_OS_IPHONE
    AVAudioSession *audioSession = [AVAudioSession sharedInstance];
    if (![audioSession.category isEqualToString:AVAudioSessionCategoryPlayAndRecord])
