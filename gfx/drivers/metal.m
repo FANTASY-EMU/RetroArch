@@ -1250,6 +1250,9 @@ typedef struct MTLALIGN(16)
    bool resize_render_targets;
    bool init_history;
    video_viewport_t *_viewport;
+   bool _hasLoggedShaderRenderState;
+   bool _lastLoggedShaderActive;
+   NSUInteger _lastLoggedDrawState;
 }
 
 - (instancetype)initWithDescriptor:(ViewDescriptor *)d context:(Context *)c
@@ -1272,6 +1275,7 @@ typedef struct MTLALIGN(16)
       self.size             = d.size;
       self.frame            = CGRectMake(0, 0, 1, 1);
       resize_render_targets = YES;
+      _hasLoggedShaderRenderState = NO;
 
       /* Initialize slang vertex buffer */
       VertexSlang v[4]      = {
@@ -1332,6 +1336,33 @@ typedef struct MTLALIGN(16)
       ss                     = [_context.device newSamplerStateWithDescriptor:sd];
       _samplers[RARCH_FILTER_NEAREST][i] = ss;
    }
+}
+
+static NSString *je_metal_draw_state_name(NSUInteger drawState)
+{
+   if (drawState == ViewDrawStateEncoder)
+      return @"encoder";
+   if (drawState == ViewDrawStateContext)
+      return @"context";
+   if (drawState == ViewDrawStateAll)
+      return @"all";
+   return @"unknown";
+}
+
+- (void)_logShaderRenderStateIfNeeded
+{
+   bool active = _shader && _shader->passes > 0;
+   if (_hasLoggedShaderRenderState
+       && _lastLoggedShaderActive == active
+       && _lastLoggedDrawState == _drawState)
+      return;
+
+   _hasLoggedShaderRenderState = YES;
+   _lastLoggedShaderActive = active;
+   _lastLoggedDrawState = _drawState;
+   NSLog(@"JE-SHADER-DIAG render active=%d drawState=%@",
+         active ? 1 : 0,
+         je_metal_draw_state_name(_drawState));
 }
 
 - (void)setFilteringIndex:(int)index smooth:(bool)smooth
@@ -1540,7 +1571,11 @@ typedef struct MTLALIGN(16)
    [self _convertFormat];
 
    if (!_shader || _shader->passes == 0)
+   {
+      _drawState = ViewDrawStateEncoder;
+      [self _logShaderRenderStateIfNeeded];
       return;
+   }
 
    for (i = 0; i < _shader->passes; i++)
    {
@@ -1660,6 +1695,8 @@ typedef struct MTLALIGN(16)
       _drawState = ViewDrawStateAll;
    else
       _drawState = ViewDrawStateContext;
+
+   [self _logShaderRenderStateIfNeeded];
 }
 
 - (void)_updateRenderTargets
@@ -1805,6 +1842,13 @@ typedef struct MTLALIGN(16)
 {
    [self _freeVideoShader:_shader];
    _shader                      = nil;
+
+   if (!path)
+   {
+      _drawState = ViewDrawStateEncoder;
+      [self _logShaderRenderStateIfNeeded];
+      return YES;
+   }
 
    struct video_shader *shader  = (struct video_shader *)calloc(1, sizeof(*shader));
    settings_t        *settings  = config_get_ptr();
@@ -2025,6 +2069,7 @@ typedef struct MTLALIGN(16)
       }
       _shader = shader;
       shader = nil;
+      _drawState = ViewDrawStateAll;
    }
    @finally
    {
@@ -2034,6 +2079,7 @@ typedef struct MTLALIGN(16)
 
    resize_render_targets = YES;
    init_history          = YES;
+   [self _logShaderRenderStateIfNeeded];
 
    return YES;
 }
@@ -2385,9 +2431,11 @@ static bool metal_set_shader(void *data,
          path = NULL;
       }
 
-      /* TODO/FIXME - actually return to stock shader */
       if (string_is_empty(path))
+      {
+         [md.frameView setShaderFromPath:nil];
          return true;
+      }
 
       if ([md.frameView setShaderFromPath:[NSString stringWithUTF8String:path]])
          return true;
