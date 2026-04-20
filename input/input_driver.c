@@ -78,8 +78,6 @@ static int16_t input_state_internal(
       unsigned port, unsigned device,
       unsigned idx, unsigned id);
 
-static bool s_joyemu_desmume_pointer_logged = false;
-
 #if DEBUG && defined(HAVE_COCOATOUCH)
 typedef struct joyemu_test_cocoa_input_snapshot
 {
@@ -109,120 +107,6 @@ static cocoa_input_data_t *joyemu_test_current_cocoa_input(void)
    return (cocoa_input_data_t*)input_st->current_data;
 }
 #endif
-
-static bool joyemu_desmume_pointer_to_pixels(int16_t pointer_x, int16_t pointer_y,
-      int buf_w, int buf_h, int *out_x, int *out_y)
-{
-   int64_t pixel_x = 0;
-   int64_t pixel_y = 0;
-
-   if (pointer_x == -0x8000 || pointer_y == -0x8000 || buf_w <= 0 || buf_h <= 0)
-      return false;
-
-   pixel_x = ((int64_t)pointer_x + 0x7fff) * buf_w;
-   pixel_y = ((int64_t)pointer_y + 0x7fff) * buf_h;
-
-   if (out_x)
-      *out_x = (int)(pixel_x / 0xffff);
-   if (out_y)
-      *out_y = (int)(pixel_y / 0xffff);
-
-   return true;
-}
-
-static int16_t joyemu_desmume_pixel_to_pointer_x(int ds_x)
-{
-   int64_t mapped = ((int64_t)ds_x * 0xffff) / 256;
-   return (int16_t)(mapped - 0x7fff);
-}
-
-static int16_t joyemu_desmume_pixel_to_pointer_y(int ds_y)
-{
-   int64_t mapped = ((int64_t)ds_y * 0xffff) / 384;
-   return (int16_t)(mapped - 0x7fff);
-}
-
-static int16_t joyemu_desmume_remap_pointer(input_driver_state_t *input_st,
-      settings_t *settings, int16_t original, unsigned port, unsigned device,
-      unsigned idx, unsigned id)
-{
-   int bot_x = 0;
-   int bot_y = 0;
-   int bot_w = 0;
-   int bot_h = 0;
-   int buf_w = 0;
-   int buf_h = 0;
-   int16_t pointer_x = original;
-   int16_t pointer_y = original;
-   int px = 0;
-   int py = 0;
-   bool in_bottom = false;
-   int ds_x = 0;
-   int ds_y = 0;
-
-   if (!is_desmume_core_active())
-   {
-      s_joyemu_desmume_pointer_logged = false;
-      return original;
-   }
-
-   if (device != RETRO_DEVICE_POINTER || port != 0)
-      return original;
-
-   if (!get_desmume_layout(
-            NULL, NULL, NULL, NULL,
-            &bot_x, &bot_y, &bot_w, &bot_h,
-            &buf_w, &buf_h))
-      return original;
-
-   pointer_x = (id == RETRO_DEVICE_ID_POINTER_X)
-      ? original
-      : input_state_internal(input_st, settings, port, device, idx, RETRO_DEVICE_ID_POINTER_X);
-   pointer_y = (id == RETRO_DEVICE_ID_POINTER_Y)
-      ? original
-      : input_state_internal(input_st, settings, port, device, idx, RETRO_DEVICE_ID_POINTER_Y);
-
-   if (!joyemu_desmume_pointer_to_pixels(pointer_x, pointer_y, buf_w, buf_h, &px, &py))
-      return (id == RETRO_DEVICE_ID_POINTER_PRESSED) ? 0 : -0x8000;
-
-   in_bottom = px >= bot_x && px < (bot_x + bot_w)
-      && py >= bot_y && py < (bot_y + bot_h);
-
-   if (!in_bottom)
-      return (id == RETRO_DEVICE_ID_POINTER_PRESSED) ? 0 : -0x8000;
-
-   ds_x = ((px - bot_x) * 256) / bot_w;
-   ds_y = 192 + (((py - bot_y) * 192) / bot_h);
-
-   if (ds_x < 0)
-      ds_x = 0;
-   else if (ds_x > 255)
-      ds_x = 255;
-
-   if (ds_y < 192)
-      ds_y = 192;
-   else if (ds_y > 383)
-      ds_y = 383;
-
-   if (!s_joyemu_desmume_pointer_logged)
-   {
-      RARCH_LOG("[JoyEMU-DeSmuME] Pointer remap: raw=(%d,%d) px=(%d,%d) -> ds=(%d,%d) in_bot=%d\n",
-            pointer_x, pointer_y, px, py, ds_x, ds_y, in_bottom ? 1 : 0);
-      s_joyemu_desmume_pointer_logged = true;
-   }
-
-   switch (id)
-   {
-      case RETRO_DEVICE_ID_POINTER_X:
-         return joyemu_desmume_pixel_to_pointer_x(ds_x);
-      case RETRO_DEVICE_ID_POINTER_Y:
-         return joyemu_desmume_pixel_to_pointer_y(ds_y);
-      case RETRO_DEVICE_ID_POINTER_PRESSED:
-         return original ? 1 : 0;
-      default:
-         return original;
-   }
-}
 
 /* Depends on ASCII character values */
 #define ISPRINT(c) (((int)(c) >= ' ' && (int)(c) <= '~') ? 1 : 0)
@@ -6653,10 +6537,6 @@ int16_t input_driver_state_wrapper(unsigned port, unsigned device,
 
    /* Read input state */
    result = input_state_internal(input_st, settings, port, device, idx, id);
-
-   if (is_desmume_core_active() && device == RETRO_DEVICE_POINTER)
-      result = joyemu_desmume_remap_pointer(
-            input_st, settings, result, port, device, idx, id);
 
    /* Register any analog stick input requests for
     * this 'virtual' (core) port */

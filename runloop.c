@@ -392,19 +392,6 @@ bool joyemu_runloop_should_display_core_message_on_osd(unsigned target)
 }
 
 static const char *g_melonds_custom_layout = NULL;
-static const char *g_desmume_custom_layout = NULL;
-static bool g_is_desmume_core_active       = false;
-static int g_ds_top_x                      = 0;
-static int g_ds_top_y                      = 0;
-static int g_ds_top_w                      = 0;
-static int g_ds_top_h                      = 0;
-static int g_ds_bot_x                      = 0;
-static int g_ds_bot_y                      = 0;
-static int g_ds_bot_w                      = 0;
-static int g_ds_bot_h                      = 0;
-static int g_ds_buf_w                      = 0;
-static int g_ds_buf_h                      = 0;
-static bool g_ds_layout_valid              = false;
 
 static void joyemu_replace_string(const char **dst, const char *value)
 {
@@ -421,76 +408,6 @@ static void joyemu_replace_string(const char **dst, const char *value)
 void set_melonds_custom_layout(const char *layout)
 {
    joyemu_replace_string(&g_melonds_custom_layout, layout);
-}
-
-void set_desmume_custom_layout(const char *layout)
-{
-   joyemu_replace_string(&g_desmume_custom_layout, layout);
-
-   /* g_ds_layout_valid is intentionally NOT set here.
-    * This disables the host-level frame transform (video_driver.c) and
-    * pointer remap (input_driver.c). The layout is now handled entirely
-    * inside the DeSmuME core via desmume_custom_layout_config → LAYOUT_CUSTOM,
-    * mirroring how MelonDS processes melonds_custom_layout_config.
-    *
-    * Ported from Skin-ODR commit 4cf82b3a9 ("替换DeSmuME核心framework") to
-    * match the new DeSmuME framework binary shipped at
-    * Cores/desmume.libretro.framework. Without this, the stale host-side
-    * parse would keep g_ds_layout_valid=true and produce double transforms
-    * when the new core also processes the layout option. */
-
-   if (layout)
-      RARCH_LOG("[JoyEMU-DeSmuME] Stored custom layout for core: %s\n", layout);
-   else
-      RARCH_LOG("[JoyEMU-DeSmuME] Cleared custom layout.\n");
-}
-
-void set_desmume_core_active(bool active)
-{
-   g_is_desmume_core_active = active;
-
-   if (!active)
-   {
-      joyemu_replace_string(&g_desmume_custom_layout, NULL);
-      g_ds_layout_valid = false;
-   }
-}
-
-bool is_desmume_core_active(void)
-{
-   return g_is_desmume_core_active;
-}
-
-bool get_desmume_layout(
-      int *top_x, int *top_y, int *top_w, int *top_h,
-      int *bot_x, int *bot_y, int *bot_w, int *bot_h,
-      int *buf_w, int *buf_h)
-{
-   if (!g_ds_layout_valid)
-      return false;
-
-   if (top_x)
-      *top_x = g_ds_top_x;
-   if (top_y)
-      *top_y = g_ds_top_y;
-   if (top_w)
-      *top_w = g_ds_top_w;
-   if (top_h)
-      *top_h = g_ds_top_h;
-   if (bot_x)
-      *bot_x = g_ds_bot_x;
-   if (bot_y)
-      *bot_y = g_ds_bot_y;
-   if (bot_w)
-      *bot_w = g_ds_bot_w;
-   if (bot_h)
-      *bot_h = g_ds_bot_h;
-   if (buf_w)
-      *buf_w = g_ds_buf_w;
-   if (buf_h)
-      *buf_h = g_ds_buf_h;
-
-   return true;
 }
 
 #define SHADER_FILE_WATCH_DELAY_MSEC 500
@@ -1661,13 +1578,6 @@ bool runloop_environment_cb(unsigned cmd, void *data)
                runloop_st->flags |= RUNLOOP_FLAG_HAS_VARIABLE_UPDATE;
 #endif
             runloop_st->core_options->updated = false;
-
-            if (g_desmume_custom_layout && string_is_equal(var->key, "desmume_custom_layout_config"))
-            {
-               var->value = g_desmume_custom_layout;
-               RARCH_LOG("[JoyEMU-DeSmuME] GET_VARIABLE override: desmume_custom_layout_config = %s\n", var->value);
-               break;
-            }
 
             /* Defensive fallback: the primary layout path now uses
                MelonDSDSSetCustomLayout (dylib), but cores loaded via

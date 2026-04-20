@@ -332,13 +332,6 @@ void runloop_set_current_core_type(
       enum rarch_core_type type, bool explicitly_set);
 
 void set_melonds_custom_layout(const char *layout);
-void set_desmume_custom_layout(const char *layout);
-void set_desmume_core_active(bool active);
-bool is_desmume_core_active(void);
-bool get_desmume_layout(
-      int *top_x, int *top_y, int *top_w, int *top_h,
-      int *bot_x, int *bot_y, int *bot_w, int *bot_h,
-      int *buf_w, int *buf_h);
 
 /**
  * runloop_iterate:
