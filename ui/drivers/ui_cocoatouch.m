@@ -652,6 +652,13 @@ enum
 
       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
                      dispatch_get_main_queue(), ^{
+         uint32_t flags = runloop_get_flags();
+         if (flags & RUNLOOP_FLAG_SHUTDOWN_INITIATED)
+            return;
+         if (flags & RUNLOOP_FLAG_PAUSED)
+         {
+            return;
+         }
 #ifdef HAVE_MICROPHONE
          command_event(CMD_EVENT_MICROPHONE_REINIT, NULL);
 #endif

@@ -2584,12 +2584,26 @@ int microphone_driver_read(retro_microphone_t *microphone, int16_t* frames, size
       if (!core_paused)
          frames_read = microphone_driver_flush(mic_st, microphone, frames_to_read);
 
+      if (frames_read == 0)
+         break;
+
       /* Otherwise, advance the counters. We're not gonna get new data,
        * but we still need to finish this loop */
       frames_remaining -= frames_read;
    } /* If the queue already has enough samples to give, the loop will be skipped */
 
-   fifo_read(microphone->outgoing_samples, frames, num_frames * sizeof(int16_t));
+   if (FIFO_READ_AVAIL(microphone->outgoing_samples) < num_frames * sizeof(int16_t))
+   {
+      size_t avail = FIFO_READ_AVAIL(microphone->outgoing_samples);
+      memset(frames, 0, num_frames * sizeof(int16_t));
+      if (avail > 0)
+         fifo_read(microphone->outgoing_samples, frames, avail);
+   }
+   else
+   {
+      fifo_read(microphone->outgoing_samples, frames, num_frames * sizeof(int16_t));
+   }
+
    return (int)num_frames;
 }
 
