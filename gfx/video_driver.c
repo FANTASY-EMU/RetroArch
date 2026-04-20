@@ -1178,8 +1178,14 @@ void video_display_server_destroy(void)
       video_display_server_set_screen_orientation(initial_screen_orientation);
 
    if (current_display_server)
+   {
       if (video_st->current_display_server_data)
+      {
          current_display_server->destroy(video_st->current_display_server_data);
+         video_st->current_display_server_data = NULL;
+      }
+   }
+   current_display_server = NULL;
 }
 
 bool video_display_server_set_window_opacity(unsigned opacity)

@@ -165,10 +165,14 @@ static void content_file_override_free(
       content_file_override_t *override =
             &p_content->content_override_list[i];
       if (override && override->ext)
+      {
          free(override->ext);
+         override->ext = NULL;
+      }
    }
 
    RBUF_FREE(p_content->content_override_list);
+   p_content->content_override_list = NULL;
 }
 
 /* Returns true if an override for content files
@@ -2986,6 +2990,8 @@ void content_deinit(void)
    content_state_t *p_content = content_state_get_ptr();
 
    content_file_override_free(p_content);
+   p_content->content_override_list = NULL;
+
    content_file_list_free(p_content->content_list);
 
    p_content->content_list = NULL;
