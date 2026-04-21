@@ -456,6 +456,8 @@ bool runloop_init_libretro_symbols(
 
 runloop_state_t *runloop_state_get_ptr(void);
 
+void je_set_core_log_hook(void (*hook)(enum retro_log_level, const char *msg));
+
 RETRO_END_DECLS
 
 #endif

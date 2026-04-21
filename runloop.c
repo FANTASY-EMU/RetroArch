@@ -1049,10 +1049,27 @@ static bool dynamic_request_hw_context(enum retro_hw_context_type type,
    return true;
 }
 
+static void (*_je_core_log_hook)(enum retro_log_level, const char *msg) = NULL;
+
+void je_set_core_log_hook(void (*hook)(enum retro_log_level, const char *msg))
+{
+   _je_core_log_hook = hook;
+}
+
 static void libretro_log_cb(
       enum retro_log_level level,
       const char *fmt, ...)
 {
+   if (_je_core_log_hook && level == RETRO_LOG_ERROR)
+   {
+      char buf[1024];
+      va_list hook_ap;
+      va_start(hook_ap, fmt);
+      vsnprintf(buf, sizeof(buf), fmt, hook_ap);
+      va_end(hook_ap);
+      _je_core_log_hook(level, buf);
+   }
+
    va_list vp;
    unsigned libretro_log_level = config_get_ptr()->uints.libretro_log_level;
 
