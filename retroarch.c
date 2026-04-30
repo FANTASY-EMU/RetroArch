@@ -6295,9 +6295,9 @@ void libretro_free_system_info(struct retro_system_info *sysinfo)
    if (!sysinfo)
       return;
 
-   free((void*)sysinfo->library_name);
-   free((void*)sysinfo->library_version);
-   free((void*)sysinfo->valid_extensions);
+   /* These fields are non-owning libretro/core strings or runloop buffers.
+    * Freeing them corrupts memory when a core returns static metadata or when
+    * runloop.c points system.info at current_library_* storage. */
    memset(sysinfo, 0, sizeof(*sysinfo));
 }
 
