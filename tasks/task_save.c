@@ -15,6 +15,7 @@
  */
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <sys/types.h>
 #include <string.h>
 #include <time.h>
@@ -72,6 +73,29 @@
 #define RASTATE_CHEEVOS_BLOCK "ACHV"
 #define RASTATE_REPLAY_BLOCK "RPLY"
 #define RASTATE_END_BLOCK "END "
+
+static volatile int g_joyemu_last_load_state_result = -1;
+
+int joyemu_content_last_load_state_result(void)
+{
+   return g_joyemu_last_load_state_result;
+}
+
+void joyemu_content_reset_load_state_result(void)
+{
+   g_joyemu_last_load_state_result = -1;
+}
+
+/* Set by JERuntime.m before each load on the hybrid MAME core. Enables the
+ * RASTATE MEM block legacy-prefix-strip in content_load_rastate1. Other
+ * cores (and other systems) keep this at 0 so the load path is untouched. */
+extern int g_joyemu_arcade_legacy_compat;
+
+/* EXT MAGIC header bytes written by ext_bridge_serialize on every modern
+ * arcade savestate. Used to distinguish modern saves from legacy FBNeo
+ * saves that carry a 4-byte LibretroAreaScan prefix instead. */
+static const unsigned char JOYEMU_ARCADE_EXT_MAGIC[4] =
+   { 0xFB, 0xAE, 0x4D, 0xE1 };
 
 struct save_state_buf
 {
@@ -852,6 +876,29 @@ static bool content_load_rastate1(unsigned char* input, size_t len)
          retro_ctx_serialize_info_t serial_info;
          serial_info.data_const = (void*)input;
          serial_info.size       = block_size;
+
+         /* Arcade legacy compat: old standalone FBNeo savestates carry a
+          * 4-byte LibretroAreaScan prefix (nCurrentFrame value) where the
+          * hybrid MAME core writes its EXT MAGIC header. Both encode the
+          * same total size, so ext_bridge_unserialize fails to detect the
+          * legacy layout, reads from the wrong offset, and silently
+          * corrupts every memory area while still returning success. The
+          * ObjC frontend gates this fix to the MAME core only - it is the
+          * only reliable signal because ext_bridge_* symbols are hidden. */
+         if (g_joyemu_arcade_legacy_compat
+             && block_size == core_serialize_size()
+             && block_size >= sizeof(JOYEMU_ARCADE_EXT_MAGIC)
+             && memcmp(input, JOYEMU_ARCADE_EXT_MAGIC,
+                       sizeof(JOYEMU_ARCADE_EXT_MAGIC)) != 0)
+         {
+            const size_t skip = sizeof(JOYEMU_ARCADE_EXT_MAGIC);
+            serial_info.data_const = (void*)(input + skip);
+            serial_info.size       = block_size - skip;
+            RARCH_LOG("[State] Arcade legacy compat: stripped %zu-byte "
+                      "LibretroAreaScan prefix (block=%zu)\n",
+                      skip, (size_t)block_size);
+         }
+
 #ifdef HAVE_BSV_MOVIE
          {
             input_driver_state_t *input_st = input_state_get_ptr();
@@ -1106,12 +1153,15 @@ static void content_load_state_cb(retro_task_t *task,
    if (!ret)
       goto error;
 
+   g_joyemu_last_load_state_result = 1;
+
    free(buf);
    free(load_data);
 
    return;
 
 error:
+   g_joyemu_last_load_state_result = 0;
    RARCH_ERR("[State] %s \"%s\".\n",
          msg_hash_to_str(MSG_FAILED_TO_LOAD_STATE),
          load_data->path);
@@ -1603,6 +1653,7 @@ bool content_load_state(const char *path,
    else
       task->flags               &= ~RETRO_TASK_FLG_MUTE;
 
+   g_joyemu_last_load_state_result = -1;
    task_queue_push(task);
 
    return true;
