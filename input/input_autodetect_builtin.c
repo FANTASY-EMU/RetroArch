@@ -729,6 +729,32 @@ DECL_AXIS(r_y_minus, +3) \
 DECL_AXIS(l2, +4) \
 DECL_AXIS(r2, +5)
 
+#define JOYEMU_DEFAULT_BINDS \
+DECL_BTN(a, 8) \
+DECL_BTN(b, 0) \
+DECL_BTN(x, 9) \
+DECL_BTN(y, 1) \
+DECL_BTN(up, 4) \
+DECL_BTN(down, 5) \
+DECL_BTN(left, 6) \
+DECL_BTN(right, 7) \
+DECL_BTN(l, 10) \
+DECL_BTN(r, 11) \
+DECL_BTN(start, 3) \
+DECL_BTN(select, 2) \
+DECL_BTN(l3, 14) \
+DECL_BTN(r3, 15) \
+DECL_BTN(l2, 12) \
+DECL_BTN(r2, 13) \
+DECL_AXIS(l_x_plus,  +0) \
+DECL_AXIS(l_x_minus, -0) \
+DECL_AXIS(l_y_plus,  -1) \
+DECL_AXIS(l_y_minus, +1) \
+DECL_AXIS(r_x_plus,  +2) \
+DECL_AXIS(r_x_minus, -2) \
+DECL_AXIS(r_y_plus,  -3) \
+DECL_AXIS(r_y_minus, +3)
+
 const char* const input_builtin_autoconfs[] =
 {
 #if defined(_WIN32) && defined(_XBOX)
@@ -805,11 +831,6 @@ const char* const input_builtin_autoconfs[] =
 #if HAVE_MFI
    DECL_AUTOCONF_DEVICE("mFi Controller", "mfi", MFI_DEFAULT_BINDS),
 #endif
-   /* JoyEngine is the JoyEMU-side joypad driver that reads je_input_state[].
-    * The button ordering in je_input_state matches MFI (same JEButton enum),
-    * so we reuse MFI_DEFAULT_BINDS. Missing this entry causes autoconfig
-    * to fail -> auto_binds stay at NO_BTN -> je_joypad_state returns 0,
-    * and skin/physical button presses never reach the core. */
-   DECL_AUTOCONF_DEVICE("JoyEngine Controller", "joyengine", MFI_DEFAULT_BINDS),
+   DECL_AUTOCONF_DEVICE("JoyEngine Controller", "joyengine", JOYEMU_DEFAULT_BINDS),
    NULL
 };
