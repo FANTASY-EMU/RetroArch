@@ -734,7 +734,14 @@ static dylib_t load_dynamic_core(const char *path, char *s,
 #endif
 
    /* Can't lookup symbols in itself on UWP */
-#if !(defined(__WINRT__) || defined(WINAPI_FAMILY) && WINAPI_FAMILY == WINAPI_FAMILY_PHONE_APP)
+   /* iOS: skip this check.  On iOS dlclose() is a no-op, so symbols
+      from a previously loaded embedded framework (e.g. mame.framework)
+      remain visible in the global symbol table via RTLD_DEFAULT even
+      after core_unload().  This is expected on iOS and does not mean
+      the core is statically linked — proceeding with dylib_load() is
+      safe and will return the existing framework handle. */
+#if !(defined(__WINRT__) || defined(WINAPI_FAMILY) && WINAPI_FAMILY == WINAPI_FAMILY_PHONE_APP) \
+   && !TARGET_OS_IPHONE
    if (dylib_proc(NULL, "retro_init"))
    {
       /* Try to verify that -lretro was not linked in from other modules
