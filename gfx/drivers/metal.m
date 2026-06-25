@@ -724,7 +724,6 @@ font_renderer_t metal_raster_font = {
 - (instancetype)initWithDescriptor:(ViewDescriptor *)td context:(Context *)context;
 - (void)drawWithContext:(Context *)ctx;
 - (void)drawWithEncoder:(id<MTLRenderCommandEncoder>)rce;
-- (void)drawWithEncoder:(id<MTLRenderCommandEncoder>)rce viewport:(MTLViewport)viewport;
 
 @end
 
@@ -755,17 +754,12 @@ font_renderer_t metal_raster_font = {
    /* Render target layer state */
    id<MTLRenderPipelineState> _t_pipelineState;
    id<MTLRenderPipelineState> _t_pipelineStateNoAlpha;
-   id<MTLRenderPipelineState> _t_pipelineStateSkinGlow;
 
    id<MTLSamplerState> _samplerStateLinear;
    id<MTLSamplerState> _samplerStateNearest;
 
    /* other state */
    Uniforms _viewportMVP;
-   BOOL _skinVideoOutputEnabled;
-   CGRect _skinVideoPrimaryFrame;
-   NSArray<NSValue *> *_skinVideoEffectFrames;
-   SkinVideoEffectUniforms _skinVideoEffectUniforms;
 }
 
 - (instancetype)initWithVideo:(const video_info_t *)video
@@ -912,20 +906,6 @@ font_renderer_t metal_raster_font = {
          RARCH_ERR("[Metal] Error creating pipeline state (no alpha) %s.\n", err.localizedDescription.UTF8String);
          return NO;
       }
-
-      psd.label                      = @"Pipeline+SkinVideoGlow";
-      psd.fragmentFunction           = [_library newFunctionWithName:@"skin_video_glow_fragment"];
-      ca.blendingEnabled             = YES;
-      ca.sourceAlphaBlendFactor      = MTLBlendFactorSourceAlpha;
-      ca.sourceRGBBlendFactor        = MTLBlendFactorSourceAlpha;
-      ca.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-      ca.destinationRGBBlendFactor   = MTLBlendFactorOneMinusSourceAlpha;
-      _t_pipelineStateSkinGlow       = [_device newRenderPipelineStateWithDescriptor:psd error:&err];
-      if (err != nil)
-      {
-         RARCH_ERR("[Metal] Error creating pipeline state (skin glow) %s.\n", err.localizedDescription.UTF8String);
-         return NO;
-      }
    }
 
    {
@@ -954,79 +934,6 @@ font_renderer_t metal_raster_font = {
 #pragma mark - video
 
 - (void)setVideo:(const video_info_t *)video { }
-
-static BOOL JEIsValidSkinVideoOutputFrame(CGRect frame)
-{
-   return isfinite(frame.origin.x)
-      && isfinite(frame.origin.y)
-      && isfinite(frame.size.width)
-      && isfinite(frame.size.height)
-      && frame.size.width > 0.0
-      && frame.size.height > 0.0;
-}
-
-static CGFloat JEClamp01(CGFloat value)
-{
-   return MIN(MAX(value, 0.0), 1.0);
-}
-
-static CGRect JEClampedSkinVideoOutputFrame(CGRect frame)
-{
-   CGFloat minX = JEClamp01(CGRectGetMinX(frame));
-   CGFloat minY = JEClamp01(CGRectGetMinY(frame));
-   CGFloat maxX = JEClamp01(CGRectGetMaxX(frame));
-   CGFloat maxY = JEClamp01(CGRectGetMaxY(frame));
-
-   return CGRectMake(minX, minY, MAX(0.0, maxX - minX), MAX(0.0, maxY - minY));
-}
-
-static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float minValue, float maxValue)
-{
-   if (!isfinite(value))
-      return fallback;
-
-   return MIN(MAX((float)value, minValue), maxValue);
-}
-
-- (void)setSkinVideoOutputPrimaryFrame:(CGRect)primaryFrame effectFrames:(NSArray<NSValue *> *)effectFrames
-{
-   [self setSkinVideoOutputPrimaryFrame:primaryFrame
-                           effectFrames:effectFrames
-                           effectRadius:10.0
-                       effectSaturation:1.5
-                             effectAlpha:0.82];
-}
-
-- (void)setSkinVideoOutputPrimaryFrame:(CGRect)primaryFrame
-                          effectFrames:(NSArray<NSValue *> *)effectFrames
-                          effectRadius:(CGFloat)effectRadius
-                      effectSaturation:(CGFloat)effectSaturation
-                            effectAlpha:(CGFloat)effectAlpha
-{
-   NSMutableArray<NSValue *> *validEffectFrames = [NSMutableArray new];
-   for (NSValue *value in effectFrames)
-   {
-      CGRect frame = JEClampedSkinVideoOutputFrame(value.CGRectValue);
-      if (JEIsValidSkinVideoOutputFrame(frame))
-         [validEffectFrames addObject:[NSValue valueWithCGRect:frame]];
-   }
-
-   CGRect clampedPrimaryFrame = JEClampedSkinVideoOutputFrame(primaryFrame);
-   if (!JEIsValidSkinVideoOutputFrame(clampedPrimaryFrame) || validEffectFrames.count == 0)
-   {
-      _skinVideoOutputEnabled = NO;
-      _skinVideoPrimaryFrame = CGRectZero;
-      _skinVideoEffectFrames = @[];
-      return;
-   }
-
-   _skinVideoOutputEnabled = YES;
-   _skinVideoPrimaryFrame = clampedPrimaryFrame;
-   _skinVideoEffectFrames = [validEffectFrames copy];
-   _skinVideoEffectUniforms.radius = JEClampedSkinVideoEffectValue(effectRadius, 10.0f, 0.0f, 80.0f);
-   _skinVideoEffectUniforms.saturation = JEClampedSkinVideoEffectValue(effectSaturation, 1.5f, 0.0f, 4.0f);
-   _skinVideoEffectUniforms.alpha = JEClampedSkinVideoEffectValue(effectAlpha, 0.82f, 0.0f, 1.0f);
-}
 
 - (bool)renderFrame:(const void *)frame
                data:(void*)data
@@ -1153,12 +1060,6 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
 
    if ((_frameView.drawState & ViewDrawStateEncoder) != 0)
    {
-      if (_skinVideoOutputEnabled && _skinVideoEffectFrames.count > 0 && _t_pipelineStateSkinGlow)
-      {
-         [self _drawSkinVideoOutputsWithEncoder:rce];
-         return;
-      }
-
       [rce setVertexBytes:_context.uniforms length:sizeof(*_context.uniforms) atIndex:BufferIndexUniforms];
       [rce setRenderPipelineState:_t_pipelineStateNoAlpha];
       if (_frameView.filter == RTextureFilterNearest)
@@ -1167,47 +1068,6 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
          [rce setFragmentSamplerState:_samplerStateLinear atIndex:SamplerIndexDraw];
       [_frameView drawWithEncoder:rce];
    }
-}
-
-- (MTLViewport)_viewportForSkinVideoFrame:(CGRect)frame
-{
-   double fullWidth  = _viewport ? _viewport->full_width : _layer.drawableSize.width;
-   double fullHeight = _viewport ? _viewport->full_height : _layer.drawableSize.height;
-
-   MTLViewport viewport;
-   viewport.originX = frame.origin.x * fullWidth;
-   viewport.originY = frame.origin.y * fullHeight;
-   viewport.width   = frame.size.width * fullWidth;
-   viewport.height  = frame.size.height * fullHeight;
-   viewport.znear   = 0.0;
-   viewport.zfar    = 1.0;
-   return viewport;
-}
-
-- (void)_drawSkinVideoOutputsWithEncoder:(id<MTLRenderCommandEncoder>)rce
-{
-   CGSize sourceSize = _frameView.size;
-   _skinVideoEffectUniforms.sourceTextureSize = simd_make_float2(
-      MAX((float)sourceSize.width, 1.0f),
-      MAX((float)sourceSize.height, 1.0f)
-   );
-
-   [rce setVertexBytes:_context.uniforms length:sizeof(*_context.uniforms) atIndex:BufferIndexUniforms];
-   [rce setRenderPipelineState:_t_pipelineStateSkinGlow];
-   [rce setFragmentSamplerState:_samplerStateLinear atIndex:SamplerIndexDraw];
-   [rce setFragmentBytes:&_skinVideoEffectUniforms
-                  length:sizeof(_skinVideoEffectUniforms)
-                 atIndex:BufferIndexSkinVideoEffect];
-
-   for (NSValue *value in _skinVideoEffectFrames)
-      [_frameView drawWithEncoder:rce viewport:[self _viewportForSkinVideoFrame:value.CGRectValue]];
-
-   [rce setRenderPipelineState:_t_pipelineStateNoAlpha];
-   if (_frameView.filter == RTextureFilterNearest)
-      [rce setFragmentSamplerState:_samplerStateNearest atIndex:SamplerIndexDraw];
-   else
-      [rce setFragmentSamplerState:_samplerStateLinear atIndex:SamplerIndexDraw];
-   [_frameView drawWithEncoder:rce viewport:[self _viewportForSkinVideoFrame:_skinVideoPrimaryFrame]];
 }
 
 - (void)_drawMenu:(video_frame_info_t *)video_info
@@ -1695,14 +1555,9 @@ static NSString *je_metal_draw_state_name(NSUInteger drawState)
 
 - (void)drawWithEncoder:(id<MTLRenderCommandEncoder>)rce
 {
-   [self drawWithEncoder:rce viewport:_engine.frame.viewport];
-}
-
-- (void)drawWithEncoder:(id<MTLRenderCommandEncoder>)rce viewport:(MTLViewport)viewport
-{
    if (_texture)
    {
-      [rce setViewport:viewport];
+      [rce setViewport:_engine.frame.viewport];
       [rce setVertexBytes:&_v length:sizeof(_v) atIndex:BufferIndexPositions];
       [rce setFragmentTexture:_texture atIndex:TextureIndexColor];
       [rce drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];

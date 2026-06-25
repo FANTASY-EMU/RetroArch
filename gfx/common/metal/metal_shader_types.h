@@ -38,8 +38,7 @@
 typedef NS_ENUM(NSInteger, BufferIndex)
 {
    BufferIndexPositions = 0,
-   BufferIndexUniforms = 1,
-   BufferIndexSkinVideoEffect = 2
+   BufferIndexUniforms = 1
 };
 
 typedef NS_ENUM(NSInteger, VertexAttribute)
@@ -83,14 +82,6 @@ typedef struct
    vector_float2 outputSize;
    float time;
 } Uniforms;
-
-typedef struct
-{
-   vector_float2 sourceTextureSize;
-   float radius;
-   float saturation;
-   float alpha;
-} SkinVideoEffectUniforms;
 
 typedef struct
 {

@@ -117,12 +117,6 @@ extern MTLPixelFormat SelectOptimalPixelFormat(MTLPixelFormat fmt);
 - (void)setNeedsResize;
 - (void)setViewportWidth:(unsigned)width height:(unsigned)height forceFull:(BOOL)forceFull allowRotate:(BOOL)allowRotate;
 - (void)setRotation:(unsigned)rotation;
-- (void)setSkinVideoOutputPrimaryFrame:(CGRect)primaryFrame effectFrames:(NSArray<NSValue *> *)effectFrames;
-- (void)setSkinVideoOutputPrimaryFrame:(CGRect)primaryFrame
-                          effectFrames:(NSArray<NSValue *> *)effectFrames
-                          effectRadius:(CGFloat)effectRadius
-                      effectSaturation:(CGFloat)effectSaturation
-                            effectAlpha:(CGFloat)effectAlpha;
 
 @end
 
