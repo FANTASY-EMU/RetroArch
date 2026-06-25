@@ -44,6 +44,31 @@ fragment float4 basic_fragment_proj_tex(ColorInOut in [[stage_in]],
     return float4(colorSample);
 }
 
+fragment float4 skin_video_glow_fragment(ColorInOut in [[stage_in]],
+                                         constant Uniforms & uniforms [[ buffer(BufferIndexUniforms) ]],
+                                         constant SkinVideoEffectUniforms & effect [[ buffer(BufferIndexSkinVideoEffect) ]],
+                                         texture2d<half> tex [[ texture(TextureIndexColor) ]],
+                                         sampler samp [[ sampler(SamplerIndexDraw) ]])
+{
+    float2 texel = effect.radius / max(effect.sourceTextureSize, float2(1.0, 1.0));
+    float2 uv = in.texCoord.xy;
+
+    float4 color = float4(tex.sample(samp, uv)) * 0.227027;
+    color += float4(tex.sample(samp, uv + float2(texel.x, 0.0))) * 0.1945946;
+    color += float4(tex.sample(samp, uv - float2(texel.x, 0.0))) * 0.1945946;
+    color += float4(tex.sample(samp, uv + float2(0.0, texel.y))) * 0.1216216;
+    color += float4(tex.sample(samp, uv - float2(0.0, texel.y))) * 0.1216216;
+    color += float4(tex.sample(samp, uv + texel)) * 0.035135;
+    color += float4(tex.sample(samp, uv - texel)) * 0.035135;
+    color += float4(tex.sample(samp, uv + float2(texel.x, -texel.y))) * 0.035135;
+    color += float4(tex.sample(samp, uv + float2(-texel.x, texel.y))) * 0.035135;
+
+    float luminance = dot(color.rgb, float3(0.2126, 0.7152, 0.0722));
+    color.rgb = mix(float3(luminance), color.rgb, effect.saturation);
+    color.a *= effect.alpha;
+    return color;
+}
+
 #pragma mark - functions for rendering sprites
 
 vertex FontFragmentIn sprite_vertex(const SpriteVertex in [[ stage_in ]], const device Uniforms &uniforms [[ buffer(BufferIndexUniforms) ]])
