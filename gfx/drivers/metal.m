@@ -76,6 +76,101 @@
       x = (__bridge __typeof__(x))(__bridge_retained void *)((NSObject *)__y); \
    }
 
+#if defined(HAVE_COCOATOUCH)
+static bool joyemu_metal_nds_touch_diag_enabled(void)
+{
+#if !defined(DEBUG) && !defined(SIDE_LOAD)
+   return false;
+#else
+   id override = [[NSUserDefaults standardUserDefaults]
+      objectForKey:@"JoyEMU.NDSTouchDiagnostics.Enabled"];
+   if ([override respondsToSelector:@selector(boolValue)])
+      return [override boolValue];
+   return true;
+#endif
+}
+
+static bool joyemu_metal_size_is_valid(CGSize size)
+{
+   return isfinite(size.width)
+      && isfinite(size.height)
+      && size.width > 0.0
+      && size.height > 0.0;
+}
+
+static CGSize joyemu_metal_resolve_viewport_size(
+      CGSize incoming_drawable_size,
+      CGSize view_bounds_size,
+      CGFloat render_pixel_scale)
+{
+   if (joyemu_metal_size_is_valid(view_bounds_size)
+         && isfinite(render_pixel_scale)
+         && render_pixel_scale > 0.0)
+      return CGSizeMake(round(view_bounds_size.width * render_pixel_scale),
+            round(view_bounds_size.height * render_pixel_scale));
+
+   if (joyemu_metal_size_is_valid(incoming_drawable_size))
+      return CGSizeMake(round(incoming_drawable_size.width),
+            round(incoming_drawable_size.height));
+
+   return CGSizeZero;
+}
+
+#if defined(DEBUG)
+CGSize joyemu_metal_resolve_viewport_size_for_testing(
+      CGSize incoming_drawable_size,
+      CGSize view_bounds_size,
+      CGFloat render_pixel_scale)
+{
+   return joyemu_metal_resolve_viewport_size(
+         incoming_drawable_size,
+         view_bounds_size,
+         render_pixel_scale);
+}
+#endif
+
+static void joyemu_nds_touch_diag_log_viewport(
+      NSString *source,
+      CAMetalLayer *layer,
+      const struct video_viewport *viewport,
+      unsigned requested_width,
+      unsigned requested_height,
+      BOOL force_full,
+      BOOL allow_rotate,
+      BOOL keep_aspect)
+{
+   if (!joyemu_metal_nds_touch_diag_enabled())
+      return;
+
+   UIScreen *screen = [UIScreen mainScreen];
+   CGSize drawable_size = layer ? layer.drawableSize : CGSizeZero;
+   CGFloat contents_scale = layer ? layer.contentsScale : 0.0;
+
+   NSLog(@"[NDS_TOUCH_DIAG][Metal] %@ requested=%ux%u viewport=(x=%d,y=%d,w=%u,h=%u,fullW=%u,fullH=%u) drawable=(w=%.3f,h=%.3f) contentsScale=%.6f screenScale=%.6f nativeScale=%.6f bounds=(w=%.3f,h=%.3f) nativeBounds=(w=%.3f,h=%.3f) forceFull=%d allowRotate=%d keepAspect=%d",
+         source,
+         requested_width,
+         requested_height,
+         viewport ? viewport->x : 0,
+         viewport ? viewport->y : 0,
+         viewport ? viewport->width : 0,
+         viewport ? viewport->height : 0,
+         viewport ? viewport->full_width : 0,
+         viewport ? viewport->full_height : 0,
+         drawable_size.width,
+         drawable_size.height,
+         contents_scale,
+         screen.scale,
+         screen.nativeScale,
+         screen.bounds.size.width,
+         screen.bounds.size.height,
+         screen.nativeBounds.size.width,
+         screen.nativeBounds.size.height,
+         force_full ? 1 : 0,
+         allow_rotate ? 1 : 0,
+         keep_aspect ? 1 : 0);
+}
+#endif
+
 /*
  * DISPLAY DRIVER
  */
@@ -949,6 +1044,17 @@ font_renderer_t metal_raster_font = {
    video_driver_update_viewport(_viewport, forceFull, _keepAspect);
    _context.viewport       = _viewport; /* Update matrix */
    _viewportMVP.outputSize = simd_make_float2(_viewport->full_width, _viewport->full_height);
+#if defined(HAVE_COCOATOUCH)
+   joyemu_nds_touch_diag_log_viewport(
+         @"setViewportWidth",
+         _layer,
+         _viewport,
+         width,
+         height,
+         forceFull,
+         allowRotate,
+         _keepAspect);
+#endif
 }
 
 #pragma mark - video
@@ -1250,8 +1356,33 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size
 {
 #ifdef HAVE_COCOATOUCH
-    CGFloat scale = [[UIScreen mainScreen] scale];
-    [self setViewportWidth:(unsigned int)view.bounds.size.width*scale height:(unsigned int)view.bounds.size.height*scale forceFull:NO allowRotate:YES];
+    CGFloat render_pixel_scale = cocoa_screen_get_render_pixel_scale();
+    if (!isfinite(render_pixel_scale) || render_pixel_scale <= 0.0)
+       render_pixel_scale = 1.0;
+
+    CGSize requested_size = joyemu_metal_resolve_viewport_size(
+          size,
+          view.bounds.size,
+          render_pixel_scale);
+    unsigned requested_width = (unsigned)requested_size.width;
+    unsigned requested_height = (unsigned)requested_size.height;
+    if (joyemu_metal_nds_touch_diag_enabled())
+    {
+       UIScreen *screen = [UIScreen mainScreen];
+       NSString *source = joyemu_metal_size_is_valid(view.bounds.size) ? @"boundsRenderPixelScale" : @"incomingDrawableFallback";
+       NSLog(@"[NDS_TOUCH_DIAG][Metal] drawableSizeWillChange bounds=(w=%.3f,h=%.3f) incomingDrawable=(w=%.3f,h=%.3f) source=%@ renderPixelScale=%.6f screenScale=%.6f nativeScale=%.6f requested=%ux%u",
+             view.bounds.size.width,
+             view.bounds.size.height,
+             size.width,
+             size.height,
+             source,
+             render_pixel_scale,
+             screen.scale,
+             screen.nativeScale,
+             requested_width,
+             requested_height);
+    }
+    [self setViewportWidth:requested_width height:requested_height forceFull:NO allowRotate:YES];
 #else
    [self setViewportWidth:(unsigned int)size.width height:(unsigned int)size.height forceFull:NO allowRotate:YES];
 #endif
