@@ -17,6 +17,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include <boolean.h>
 
@@ -188,6 +189,18 @@ bool ios_running_on_ipad(void)
    return (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad);
 }
 
+static int16_t joyemu_cocoatouch_scale_coordinate_for_render_pixels(
+      CGFloat coordinate,
+      CGFloat render_pixel_scale)
+{
+   if (!isfinite((double)coordinate)
+         || !isfinite((double)render_pixel_scale)
+         || render_pixel_scale <= 0.0)
+      return 0;
+
+   return (int16_t)(coordinate * render_pixel_scale);
+}
+
 /* Input helpers: This is kept here because it needs ObjC */
 static void handle_touch_event(NSArray* touches)
 {
@@ -195,7 +208,7 @@ static void handle_touch_event(NSArray* touches)
    unsigned i;
    cocoa_input_data_t *apple = (cocoa_input_data_t*)
       input_state_get_ptr()->current_data;
-   float scale               = cocoa_screen_get_native_scale();
+   float scale               = cocoa_screen_get_render_pixel_scale();
 
    if (!apple)
       return;
@@ -208,8 +221,10 @@ static void handle_touch_event(NSArray* touches)
       CGPoint       coord = [touch locationInView:[touch view]];
       if (touch.phase != UITouchPhaseEnded && touch.phase != UITouchPhaseCancelled)
       {
-         apple->touches[apple->touch_count   ].screen_x = coord.x * scale;
-         apple->touches[apple->touch_count ++].screen_y = coord.y * scale;
+         apple->touches[apple->touch_count   ].screen_x =
+            joyemu_cocoatouch_scale_coordinate_for_render_pixels(coord.x, scale);
+         apple->touches[apple->touch_count ++].screen_y =
+            joyemu_cocoatouch_scale_coordinate_for_render_pixels(coord.y, scale);
       }
    }
 #endif
@@ -596,7 +611,7 @@ enum
 {
 #ifdef HAVE_COCOA_METAL
    MetalView *metalView = (MetalView*) _renderView;
-   CGFloat scale        = [[UIScreen mainScreen] scale];
+   CGFloat scale        = cocoa_screen_get_render_pixel_scale();
    [metalView setDrawableSize:CGSizeMake(
          _renderView.bounds.size.width * scale,
          _renderView.bounds.size.height * scale
@@ -1172,10 +1187,13 @@ enum
    if (!apple || apple->mouse_grabbed)
       return nil;
    CGPoint location = [apple_platform.renderView convertPoint:[request location] fromView:nil];
-   apple->touches[0].screen_x = (int16_t)(location.x * [[UIScreen mainScreen] scale]);
-   apple->touches[0].screen_y = (int16_t)(location.y * [[UIScreen mainScreen] scale]);
-   apple->window_pos_x = (int16_t)(location.x * [[UIScreen mainScreen] scale]);
-   apple->window_pos_y = (int16_t)(location.y * [[UIScreen mainScreen] scale]);
+   CGFloat scale    = cocoa_screen_get_render_pixel_scale();
+   int16_t x        = joyemu_cocoatouch_scale_coordinate_for_render_pixels(location.x, scale);
+   int16_t y        = joyemu_cocoatouch_scale_coordinate_for_render_pixels(location.y, scale);
+   apple->touches[0].screen_x = x;
+   apple->touches[0].screen_y = y;
+   apple->window_pos_x = x;
+   apple->window_pos_y = y;
    return [UIPointerRegion regionWithRect:[apple_platform.renderView bounds] identifier:@"game view"];
 }
 #endif

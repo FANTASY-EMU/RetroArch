@@ -43,6 +43,8 @@ static CMMotionManager *motionManager;
 #import <GameController/GameController.h>
 #endif
 #if TARGET_OS_IOS
+#import <Foundation/Foundation.h>
+#import <QuartzCore/QuartzCore.h>
 #import <CoreHaptics/CoreHaptics.h>
 #endif
 
@@ -69,6 +71,33 @@ typedef struct icade_map
  */
 #ifdef OSX
 float cocoa_screen_get_backing_scale_factor(void);
+#endif
+
+#if TARGET_OS_IOS
+static bool joyemu_cocoa_input_nds_touch_diag_enabled(void)
+{
+#if !defined(DEBUG) && !defined(SIDE_LOAD)
+   return false;
+#else
+   id override = [[NSUserDefaults standardUserDefaults]
+      objectForKey:@"JoyEMU.NDSTouchDiagnostics.Enabled"];
+   if ([override respondsToSelector:@selector(boolValue)])
+      return [override boolValue];
+   return true;
+#endif
+}
+
+static bool joyemu_nds_touch_diag_should_log_input(void)
+{
+   static CFTimeInterval last_log_time = 0;
+   CFTimeInterval now                  = CACurrentMediaTime();
+
+   if (now - last_log_time < 0.08)
+      return false;
+
+   last_log_time = now;
+   return true;
+}
 #endif
 
 #if TARGET_OS_IPHONE
@@ -437,7 +466,7 @@ static void cocoa_input_poll(void *data)
 
       memset(&vp, 0, sizeof(vp));
 
-      video_driver_translate_coord_viewport_confined_wrap(
+      bool confined_ok = video_driver_translate_coord_viewport_confined_wrap(
             &vp,
             apple->touches[i].screen_x * backing_scale_factor,
             apple->touches[i].screen_y * backing_scale_factor,
@@ -446,7 +475,7 @@ static void cocoa_input_poll(void *data)
             &apple->touches[i].full_x,
             &apple->touches[i].full_y);
 
-      video_driver_translate_coord_viewport_wrap(
+      bool fixed_ok = video_driver_translate_coord_viewport_wrap(
             &vp,
             apple->touches[i].screen_x * backing_scale_factor,
             apple->touches[i].screen_y * backing_scale_factor,
@@ -454,6 +483,40 @@ static void cocoa_input_poll(void *data)
             &apple->touches[i].fixed_y,
             &apple->touches[i].full_x,
             &apple->touches[i].full_y);
+
+#if TARGET_OS_IOS
+      if (apple->touch_count > 0
+            && i < apple->touch_count
+            && joyemu_cocoa_input_nds_touch_diag_enabled()
+            && joyemu_nds_touch_diag_should_log_input())
+      {
+         int translated_x = apple->touches[i].screen_x * backing_scale_factor;
+         int translated_y = apple->touches[i].screen_y * backing_scale_factor;
+
+         NSLog(@"[NDS_TOUCH_DIAG][CocoaInput] poll touch index=%u count=%u backingScale=%d rawStored=(x=%d,y=%d) translated=(x=%d,y=%d) viewport=(x=%d,y=%d,w=%u,h=%u,fullW=%u,fullH=%u) confinedOK=%d fixedOK=%d confined=(x=%d,y=%d) fixed=(x=%d,y=%d) full=(x=%d,y=%d)",
+               i,
+               apple->touch_count,
+               backing_scale_factor,
+               apple->touches[i].screen_x,
+               apple->touches[i].screen_y,
+               translated_x,
+               translated_y,
+               vp.x,
+               vp.y,
+               vp.width,
+               vp.height,
+               vp.full_width,
+               vp.full_height,
+               confined_ok ? 1 : 0,
+               fixed_ok ? 1 : 0,
+               apple->touches[i].confined_x,
+               apple->touches[i].confined_y,
+               apple->touches[i].fixed_x,
+               apple->touches[i].fixed_y,
+               apple->touches[i].full_x,
+               apple->touches[i].full_y);
+      }
+#endif
    }
 }
 

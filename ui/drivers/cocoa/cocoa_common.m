@@ -915,6 +915,28 @@ float cocoa_screen_get_native_scale(void)
 #endif
     return ret;
 }
+
+float cocoa_screen_get_render_pixel_scale(void)
+{
+    CGFloat ret = cocoa_screen_get_native_scale();
+    if (!isfinite(ret) || ret <= 0.0f)
+    {
+        RAScreen *screen = (BRIDGE RAScreen*)cocoa_screen_get_chosen();
+        SEL selector     = NSSelectorFromString(BOXSTRING("nativeScale"));
+        if (!screen)
+            screen       = [RAScreen mainScreen];
+
+        if (screen && [screen respondsToSelector:selector])
+            ret = (float)get_from_selector([screen class], screen, selector, &ret);
+        else if (screen && isfinite(screen.scale) && screen.scale > 0.0f)
+            ret = screen.scale;
+    }
+
+    if (!isfinite(ret) || ret <= 0.0f)
+        ret = 1.0f;
+
+    return ret;
+}
 #endif
 
 void *nsview_get_ptr(void)

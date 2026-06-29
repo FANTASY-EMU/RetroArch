@@ -132,6 +132,7 @@ bool cocoa_launch_game_by_filename(NSString *filename);
 
 #ifdef HAVE_COCOATOUCH
 float cocoa_screen_get_native_scale(void);
+float cocoa_screen_get_render_pixel_scale(void);
 #else
 float cocoa_screen_get_backing_scale_factor(void);
 #endif
