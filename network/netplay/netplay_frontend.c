@@ -9770,6 +9770,10 @@ bool netplay_driver_ctl(enum rarch_netplay_ctl_state state, void *data)
          ret = (net_st->core_netpacket_interface != NULL);
          break;
 
+      case RARCH_NETPLAY_CTL_HAS_ACTIVE_CONNECTION:
+         ret = netplay_have_any_active_connection(netplay);
+         break;
+
       case RARCH_NETPLAY_CTL_ALLOW_TIMESKIP:
          ret = (!netplay
                   || netplay->modus != NETPLAY_MODUS_CORE_PACKET_INTERFACE
