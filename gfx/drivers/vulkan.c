@@ -285,6 +285,7 @@ typedef struct vk
       math_matrix_4x4 mvp;
       VkRect2D scissor;    /* int32_t alignment */
    } tracker;
+   bool skin_video_full_viewport;
    uint32_t flags;
 } vk_t;
 
@@ -4057,6 +4058,9 @@ static void vulkan_set_viewport(void *data, unsigned vp_width,
    bool video_scale_integer  = config_get_ptr()->bools.video_scale_integer;
    vk_t *vk                  = (vk_t*)data;
 
+   if (vk && vk->skin_video_full_viewport)
+      force_full = true;
+
    if (vk->ctx_driver->translate_aspect)
       device_aspect         = vk->ctx_driver->translate_aspect(
             vk->ctx_data, vp_width, vp_height);
@@ -5406,6 +5410,25 @@ static void vulkan_set_aspect_ratio(void *data, unsigned aspect_ratio_idx)
    vk_t *vk = (vk_t*)data;
    if (vk)
       vk->flags |= VK_FLAG_KEEP_ASPECT | VK_FLAG_SHOULD_RESIZE;
+}
+
+void JE_vulkan_set_skin_video_full_viewport(void *data, bool enabled)
+{
+   vk_t *vk = (vk_t*)data;
+   if (!vk)
+      return;
+
+   if (vk->skin_video_full_viewport == enabled)
+      return;
+
+   vk->skin_video_full_viewport = enabled;
+   vk->flags |= VK_FLAG_SHOULD_RESIZE;
+
+   if (vk->video_width && vk->video_height)
+      vulkan_set_viewport(vk, vk->video_width, vk->video_height, false, true);
+
+   RARCH_LOG("[Vulkan] Skin video full viewport %s.\n",
+         enabled ? "enabled" : "disabled");
 }
 
 static void vulkan_apply_state_changes(void *data)

@@ -1118,7 +1118,7 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
    }
 
    CGRect clampedPrimaryFrame = JEClampedSkinVideoOutputFrame(primaryFrame);
-   if (!JEIsValidSkinVideoOutputFrame(clampedPrimaryFrame) || validEffectFrames.count == 0)
+   if (!JEIsValidSkinVideoOutputFrame(clampedPrimaryFrame))
    {
       _skinVideoOutputEnabled = NO;
       _skinVideoPrimaryFrame = CGRectZero;
@@ -1259,7 +1259,7 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
 
    if ((_frameView.drawState & ViewDrawStateEncoder) != 0)
    {
-      if (_skinVideoOutputEnabled && _skinVideoEffectFrames.count > 0 && _t_pipelineStateSkinGlow)
+      if (_skinVideoOutputEnabled)
       {
          [self _drawSkinVideoOutputsWithEncoder:rce];
          return;
@@ -1299,14 +1299,17 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
    );
 
    [rce setVertexBytes:_context.uniforms length:sizeof(*_context.uniforms) atIndex:BufferIndexUniforms];
-   [rce setRenderPipelineState:_t_pipelineStateSkinGlow];
-   [rce setFragmentSamplerState:_samplerStateLinear atIndex:SamplerIndexDraw];
-   [rce setFragmentBytes:&_skinVideoEffectUniforms
-                  length:sizeof(_skinVideoEffectUniforms)
-                 atIndex:BufferIndexSkinVideoEffect];
+   if (_skinVideoEffectFrames.count > 0 && _t_pipelineStateSkinGlow)
+   {
+      [rce setRenderPipelineState:_t_pipelineStateSkinGlow];
+      [rce setFragmentSamplerState:_samplerStateLinear atIndex:SamplerIndexDraw];
+      [rce setFragmentBytes:&_skinVideoEffectUniforms
+                     length:sizeof(_skinVideoEffectUniforms)
+                    atIndex:BufferIndexSkinVideoEffect];
 
-   for (NSValue *value in _skinVideoEffectFrames)
-      [_frameView drawWithEncoder:rce viewport:[self _viewportForSkinVideoFrame:value.CGRectValue]];
+      for (NSValue *value in _skinVideoEffectFrames)
+         [_frameView drawWithEncoder:rce viewport:[self _viewportForSkinVideoFrame:value.CGRectValue]];
+   }
 
    [rce setRenderPipelineState:_t_pipelineStateNoAlpha];
    if (_frameView.filter == RTextureFilterNearest)
