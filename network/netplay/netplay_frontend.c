@@ -4219,11 +4219,18 @@ static void netplay_hangup(netplay_t *netplay,
 #endif
    }
 
-   if (networking_driver_st.core_netpacket_interface
-         && was_playing && netplay->is_server
-         && networking_driver_st.core_netpacket_interface->disconnected)
-      networking_driver_st.core_netpacket_interface->disconnected
-            ((uint16_t)(connection - netplay->connections + 1));
+   if (was_playing &&
+         netplay->modus == NETPLAY_MODUS_CORE_PACKET_INTERFACE &&
+         networking_driver_st.core_netpacket_interface &&
+         networking_driver_st.core_netpacket_interface->disconnected)
+   {
+      uint16_t disconnected_client_id = 0;
+      if (netplay->is_server)
+         disconnected_client_id =
+               (uint16_t)(connection - netplay->connections + 1);
+      networking_driver_st.core_netpacket_interface->disconnected(
+            disconnected_client_id);
+   }
 
    RARCH_LOG("[Netplay] %s\n", _msg);
    /* This notification is really only important to the server if the client was playing.
