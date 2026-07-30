@@ -54,6 +54,7 @@
 #include "../../record/record_driver.h"
 #include "../../retroarch.h"
 #include "../../verbosity.h"
+#include "../../joyemu_cadence_trace_compat.h"
 
 #define VK_REMAP_TO_TEXFMT(fmt) ((fmt == VK_FORMAT_R5G6B5_UNORM_PACK16) ? VK_FORMAT_R8G8B8A8_UNORM : fmt)
 
@@ -5227,6 +5228,8 @@ static bool vulkan_frame(void *data, const void *frame,
    }
    submit_info.pSignalSemaphores = submit_info.signalSemaphoreCount ? signal_semaphores : NULL;
 
+   joyemu_cadence_trace_token_t submit_cadence_trace =
+      joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_VULKAN_SUBMIT);
 #ifdef HAVE_THREADS
    slock_lock(vk->context->queue_lock);
 #endif
@@ -5236,6 +5239,8 @@ static bool vulkan_frame(void *data, const void *frame,
 #ifdef HAVE_THREADS
    slock_unlock(vk->context->queue_lock);
 #endif
+   joyemu_cadence_trace_end(
+         JOYEMU_CADENCE_TRACE_VULKAN_SUBMIT, submit_cadence_trace);
 
    if (vk->ctx_driver->swap_buffers)
       vk->ctx_driver->swap_buffers(vk->ctx_data);
@@ -5886,6 +5891,8 @@ static bool vulkan_read_viewport(void *data, uint8_t *buffer, bool is_idle)
    }
    else
    {
+      joyemu_cadence_trace_token_t readback_cadence_trace =
+         joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_VULKAN_READBACK);
       /* Synchronous path only for now. */
       /* TODO: How will we deal with format conversion?
        * For now, take the simplest route and use image blitting
@@ -5905,9 +5912,19 @@ static bool vulkan_read_viewport(void *data, uint8_t *buffer, bool is_idle)
 
       if (!staging->memory)
       {
+         joyemu_cadence_trace_record_vulkan_readback_missing_image();
          RARCH_ERR(
+               "[JEVulkanReadback] Missing synchronous image: isIdle=%d frameIndex=%u "
+               "swapchainIndex=%u hasAcquired=%u flags=0x%llx.\n"
                "[Vulkan] Attempted to readback synchronously, but no image is present.\n"
-               "[Vulkan] This can happen if vsync is disabled on Windows systems due to mailbox emulation.\n");
+               "[Vulkan] This can happen if vsync is disabled on Windows systems due to mailbox emulation.\n",
+               is_idle ? 1 : 0,
+               (unsigned)vk->context->current_frame_index,
+               (unsigned)vk->context->current_swapchain_index,
+               (vk->context->flags & VK_CTX_FLAG_HAS_ACQUIRED_SWAPCHAIN) ? 1u : 0u,
+               (unsigned long long)vk->flags);
+         joyemu_cadence_trace_end(
+               JOYEMU_CADENCE_TRACE_VULKAN_READBACK, readback_cadence_trace);
          return false;
       }
 
@@ -5966,6 +5983,8 @@ static bool vulkan_read_viewport(void *data, uint8_t *buffer, bool is_idle)
       }
       vulkan_destroy_texture(
             vk->context->device, staging);
+      joyemu_cadence_trace_end(
+            JOYEMU_CADENCE_TRACE_VULKAN_READBACK, readback_cadence_trace);
    }
    return true;
 }

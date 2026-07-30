@@ -20,6 +20,7 @@
  */
 
 #include "input/input_driver.h"
+#include "joyemu_cadence_trace_compat.h"
 #ifdef _WIN32
 #ifdef _XBOX
 #include <xtl.h>
@@ -8383,7 +8384,12 @@ void core_run(void)
    else if (late_polling)
       current_core->flags &= ~RETRO_CORE_FLAG_INPUT_POLLED;
 
-   current_core->retro_run();
+   {
+      joyemu_cadence_trace_token_t core_run_trace =
+         joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_CORE_RUN);
+      current_core->retro_run();
+      joyemu_cadence_trace_end(JOYEMU_CADENCE_TRACE_CORE_RUN, core_run_trace);
+   }
 
 #ifdef HAVE_GAME_AI
    {

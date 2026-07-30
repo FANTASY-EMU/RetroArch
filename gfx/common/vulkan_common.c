@@ -38,6 +38,7 @@
 
 #include "../../verbosity.h"
 #include "../../configuration.h"
+#include "../../joyemu_cadence_trace_compat.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -1761,6 +1762,8 @@ uint32_t vulkan_find_memory_type_fallback(
 void vulkan_acquire_next_image(gfx_ctx_vulkan_data_t *vk)
 {
    unsigned index;
+   joyemu_cadence_trace_token_t cadence_trace =
+      joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_VULKAN_ACQUIRE);
    VkFenceCreateInfo fence_info;
    VkSemaphoreCreateInfo sem_info;
    VkResult err                   = VK_SUCCESS;
@@ -1787,6 +1790,8 @@ retry:
          RARCH_ERR("[Vulkan] Failed to create new swapchain.\n");
 #endif
          retro_sleep(20);
+         joyemu_cadence_trace_end(
+               JOYEMU_CADENCE_TRACE_VULKAN_ACQUIRE, cadence_trace);
          return;
       }
 
@@ -1798,6 +1803,8 @@ retry:
          vulkan_acquire_clear_fences(vk);
          vulkan_acquire_wait_fences(vk);
          vk->context.flags                  |= VK_CTX_FLAG_INVALID_SWAPCHAIN;
+         joyemu_cadence_trace_end(
+               JOYEMU_CADENCE_TRACE_VULKAN_ACQUIRE, cadence_trace);
          return;
       }
    }
@@ -1896,6 +1903,8 @@ retry:
             /* Force driver to reset swapchain image handles. */
             vk->context.flags |= VK_CTX_FLAG_INVALID_SWAPCHAIN;
             vulkan_acquire_clear_fences(vk);
+            joyemu_cadence_trace_end(
+                  JOYEMU_CADENCE_TRACE_VULKAN_ACQUIRE, cadence_trace);
             return;
          }
          break;
@@ -1906,6 +1915,8 @@ retry:
       vkCreateSemaphore(vk->context.device, &sem_info,
             NULL, &vk->context.swapchain_semaphores[index]);
    vulkan_acquire_wait_fences(vk);
+   joyemu_cadence_trace_end(
+         JOYEMU_CADENCE_TRACE_VULKAN_ACQUIRE, cadence_trace);
 }
 
 #ifdef VULKAN_HDR_SWAPCHAIN
@@ -2648,6 +2659,8 @@ void vulkan_context_destroy(gfx_ctx_vulkan_data_t *vk,
 
 void vulkan_present(gfx_ctx_vulkan_data_t *vk, unsigned index)
 {
+   joyemu_cadence_trace_token_t cadence_trace =
+      joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_VULKAN_PRESENT);
    VkPresentInfoKHR present;
    VkResult result                 = VK_SUCCESS;
    VkResult err                    = VK_SUCCESS;
@@ -2691,6 +2704,8 @@ void vulkan_present(gfx_ctx_vulkan_data_t *vk, unsigned index)
 #ifdef HAVE_THREADS
    slock_unlock(vk->context.queue_lock);
 #endif
+   joyemu_cadence_trace_end(
+         JOYEMU_CADENCE_TRACE_VULKAN_PRESENT, cadence_trace);
 }
 
 void vulkan_initialize_render_pass(VkDevice device, VkFormat format,

@@ -42,6 +42,7 @@
 #include "../../configuration.h"
 #include "../../retroarch.h"
 #include "../../verbosity.h"
+#include "../../joyemu_cadence_trace_compat.h"
 #ifdef HAVE_METAL
 #include "../common/metal_common.h"
 #endif
@@ -324,14 +325,22 @@ static void cocoa_gl_gfx_ctx_swap_interval(void *data, int i)
 static void cocoa_gl_gfx_ctx_swap_buffers(void *data)
 {
 #ifdef OSX
+   joyemu_cadence_trace_token_t swap_trace =
+      joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_GL_SWAP);
    [g_ctx flushBuffer];
    [g_hw_ctx  flushBuffer];
+   joyemu_cadence_trace_end(JOYEMU_CADENCE_TRACE_GL_SWAP, swap_trace);
 #else
    cocoa_ctx_data_t *cocoa_ctx = (cocoa_ctx_data_t*)data;
    if (!(--cocoa_ctx->fast_forward_skips < 0))
       return;
    if (glk_view)
+   {
+      joyemu_cadence_trace_token_t swap_trace =
+         joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_GL_SWAP);
       [glk_view display];
+      joyemu_cadence_trace_end(JOYEMU_CADENCE_TRACE_GL_SWAP, swap_trace);
+   }
    cocoa_ctx->fast_forward_skips =
       (cocoa_ctx->flags & COCOA_CTX_FLAG_IS_SYNCING) ? 0 : 3;
 #endif

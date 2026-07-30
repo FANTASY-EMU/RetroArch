@@ -20,10 +20,14 @@
 #endif
 
 #include <glsym/glsym.h>
+#include "../../joyemu_cadence_trace_compat.h"
 
 void gl_flush(void)
 {
+   joyemu_cadence_trace_token_t flush_trace =
+      joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_GL_FLUSH);
    glFlush();
+   joyemu_cadence_trace_end(JOYEMU_CADENCE_TRACE_GL_FLUSH, flush_trace);
 }
 
 void gl_clear(void)

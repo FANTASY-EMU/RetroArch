@@ -35,6 +35,7 @@
 
 #include "../audio_driver.h"
 #include "../../verbosity.h"
+#include "../../joyemu_cadence_trace_compat.h"
 
 typedef struct coreaudio
 {
@@ -311,6 +312,8 @@ static ssize_t coreaudio_write(void *data, const void *buf_, size_t len)
    coreaudio_t *dev   = (coreaudio_t*)data;
    const uint8_t *buf = (const uint8_t*)buf_;
    size_t _len        = 0;
+   joyemu_cadence_trace_token_t blocked_trace =
+      joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_AUDIO_BLOCKED);
 
    while (!dev->is_paused && len > 0)
    {
@@ -347,6 +350,7 @@ static ssize_t coreaudio_write(void *data, const void *buf_, size_t len)
       slock_unlock(dev->lock);
    }
 
+   joyemu_cadence_trace_end(JOYEMU_CADENCE_TRACE_AUDIO_BLOCKED, blocked_trace);
    return _len;
 }
 
