@@ -76,6 +76,14 @@
       x = (__bridge __typeof__(x))(__bridge_retained void *)((NSObject *)__y); \
    }
 
+static bool joyemu_metal_nonblocking_frame_acquisition_enabled(void)
+{
+   id override = [[NSUserDefaults standardUserDefaults]
+         objectForKey:
+            @"JoyEMU.JoyEngine.MetalNonBlockingFrameAcquisitionEnabled"];
+   return override ? [override boolValue] : true;
+}
+
 #if defined(HAVE_COCOATOUCH)
 static bool joyemu_metal_nds_touch_diag_enabled(void)
 {
@@ -941,6 +949,7 @@ font_renderer_t metal_raster_font = {
 
 - (void)dealloc
 {
+   _context.nonBlockingFrameAcquisition = false;
    if (_viewport)
    {
       free(_viewport);
@@ -1147,7 +1156,9 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
    {
       bool statistics_show = video_info->statistics_show;
 
-      [self _beginFrame];
+      JEFrameBeginResult beginResult = [self _beginFrame];
+      if (beginResult != JEFrameBeginResultReady)
+         return YES;
 
       _frameView.frameCount = frameCount;
       if (frame && width && height)
@@ -1239,7 +1250,7 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
    font_driver_render_msg(data, msg, NULL, NULL);
 }
 
-- (void)_beginFrame
+- (JEFrameBeginResult)_beginFrame
 {
    video_viewport_t vp = *_viewport;
    video_driver_update_viewport(_viewport, NO, _keepAspect);
@@ -1247,7 +1258,7 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
    if (memcmp(&vp, _viewport, sizeof(vp)) != 0)
       _context.viewport = _viewport;
 
-   [_context begin];
+   return [_context begin];
 }
 
 - (void)_drawCore
@@ -2684,6 +2695,16 @@ static void metal_set_nonblock_state(void *data, bool non_block,
       bool adaptive_vsync_enabled, unsigned swap_interval)
 {
    MetalDriver *md = (__bridge MetalDriver *)data;
+   bool effectiveNonBlocking = non_block
+      && joyemu_metal_nonblocking_frame_acquisition_enabled();
+   if (md.context.nonBlockingFrameAcquisition != effectiveNonBlocking)
+   {
+      RARCH_LOG(
+            "[JEMetalBackpressure] policy=%s requestedNonblock=%d\n",
+            effectiveNonBlocking ? "mailbox" : "legacy-blocking",
+            non_block ? 1 : 0);
+   }
+   md.context.nonBlockingFrameAcquisition = effectiveNonBlocking;
    md.context.displaySyncEnabled = !non_block;
 }
 

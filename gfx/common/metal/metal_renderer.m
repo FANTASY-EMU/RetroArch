@@ -15,9 +15,11 @@
  */
 
 #include <retro_assert.h>
+#include <stdatomic.h>
 
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
+#import <os/lock.h>
 
 #import "metal_common.h"
 #import "metal_shader_types.h"
@@ -28,12 +30,33 @@
 
 #import "../metal_common.h"
 #include "../../verbosity.h"
+#include "../../../joyemu_cadence_trace_compat.h"
 
 /*
  * COMMON
  */
 
 static NSString *RPixelStrings[RPixelFormatCount];
+static atomic_bool g_joyemuMetalRenderToken = ATOMIC_VAR_INIT(false);
+static char g_joyemuMetalDrawableQueueKey;
+
+void joyemu_metal_render_token_publish(void)
+{
+   atomic_store_explicit(
+         &g_joyemuMetalRenderToken, true, memory_order_release);
+}
+
+bool joyemu_metal_render_token_try_consume(void)
+{
+   return atomic_exchange_explicit(
+         &g_joyemuMetalRenderToken, false, memory_order_acq_rel);
+}
+
+void joyemu_metal_render_token_reset(void)
+{
+   atomic_store_explicit(
+         &g_joyemuMetalRenderToken, false, memory_order_release);
+}
 
 NSUInteger RPixelFormatToBPP(RPixelFormat format)
 {
@@ -128,11 +151,31 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
 
 @interface Context()
 - (bool)_initConversionFilters;
+- (void)_scheduleDrawablePrefetch;
+- (id<CAMetalDrawable>)_takePrefetchedDrawableCaptureCompatible:
+      (bool *)captureCompatible;
+- (id<CAMetalDrawable>)_blockingDrawable;
+- (void)_syncDrawableQueue:(dispatch_block_t)block;
+- (void)_recordFrameBeginResult:(JEFrameBeginResult)result;
 @end
 
 @implementation Context
 {
    dispatch_semaphore_t _inflightSemaphore;
+   dispatch_queue_t _drawableQueue;
+   os_unfair_lock _drawableLock;
+   id<CAMetalDrawable> _prefetchedDrawable;
+   bool _prefetchedDrawableCaptureCompatible;
+   atomic_bool _drawablePrefetchInFlight;
+   atomic_bool _drawablePrefetchPaused;
+
+   atomic_uint_fast64_t _frameBeginAttempts;
+   atomic_uint_fast64_t _frameBeginReady;
+   atomic_uint_fast64_t _frameBeginNoRenderToken;
+   atomic_uint_fast64_t _frameBeginNoInflightSlot;
+   atomic_uint_fast64_t _frameBeginDrawableUnavailable;
+   atomic_uint_fast64_t _drawableWaitExceededBudget;
+
    id<MTLCommandQueue> _commandQueue;
    CAMetalLayer *_layer;
    id<CAMetalDrawable> _drawable;
@@ -152,8 +195,11 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
    id<MTLRenderPipelineState> _states[GFX_MAX_SHADERS][2];
    id<MTLRenderPipelineState> _clearState;
 
-   bool _captureEnabled;
+   atomic_bool _captureEnabled;
+   atomic_bool _nonBlockingFrameAcquisition;
    id<MTLTexture> _backBuffer;
+   bool _backBufferCaptureCompatible;
+   bool _drawableCaptureCompatible;
 
    unsigned _rotation;
    matrix_float4x4 _mvp_no_rot;
@@ -172,8 +218,29 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
       int i;
       
       _inflightSemaphore         = dispatch_semaphore_create(MAX_INFLIGHT);
+      _drawableQueue             = dispatch_queue_create(
+            "com.yipin.joyemu.metal.drawable-mailbox",
+            DISPATCH_QUEUE_SERIAL);
+      dispatch_queue_set_specific(
+            _drawableQueue,
+            &g_joyemuMetalDrawableQueueKey,
+            (__bridge void *)self,
+            NULL);
+      _drawableLock              = OS_UNFAIR_LOCK_INIT;
+      atomic_init(&_drawablePrefetchInFlight, false);
+      atomic_init(&_drawablePrefetchPaused, false);
+      atomic_init(&_frameBeginAttempts, 0);
+      atomic_init(&_frameBeginReady, 0);
+      atomic_init(&_frameBeginNoRenderToken, 0);
+      atomic_init(&_frameBeginNoInflightSlot, 0);
+      atomic_init(&_frameBeginDrawableUnavailable, 0);
+      atomic_init(&_drawableWaitExceededBudget, 0);
+      atomic_init(&_captureEnabled, false);
+      atomic_init(&_nonBlockingFrameAcquisition, false);
       _device                    = d;
       _layer                     = layer;
+      if (@available(iOS 11.2, tvOS 11.2, macOS 10.13.2, *))
+         _layer.maximumDrawableCount = MAX_INFLIGHT;
 #ifdef OSX
       _layer.framebufferOnly     = NO;
       _layer.displaySyncEnabled  = YES;
@@ -266,6 +333,49 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
 #else
    return NO;
 #endif
+}
+
+- (void)setNonBlockingFrameAcquisition:(bool)nonBlockingFrameAcquisition
+{
+   bool previous = atomic_exchange_explicit(
+         &_nonBlockingFrameAcquisition,
+         nonBlockingFrameAcquisition,
+         memory_order_acq_rel);
+   if (previous == nonBlockingFrameAcquisition)
+      return;
+
+   joyemu_metal_render_token_reset();
+   atomic_store_explicit(&_frameBeginAttempts, 0, memory_order_relaxed);
+   atomic_store_explicit(&_frameBeginReady, 0, memory_order_relaxed);
+   atomic_store_explicit(&_frameBeginNoRenderToken, 0, memory_order_relaxed);
+   atomic_store_explicit(&_frameBeginNoInflightSlot, 0, memory_order_relaxed);
+   atomic_store_explicit(&_frameBeginDrawableUnavailable, 0, memory_order_relaxed);
+   atomic_store_explicit(&_drawableWaitExceededBudget, 0, memory_order_relaxed);
+
+   if (nonBlockingFrameAcquisition)
+   {
+      atomic_store_explicit(
+            &_drawablePrefetchPaused, false, memory_order_release);
+      [self _scheduleDrawablePrefetch];
+   }
+   else
+   {
+      atomic_store_explicit(
+            &_drawablePrefetchPaused, true, memory_order_release);
+      /* Drain any queued nextDrawable request before Context teardown. */
+      [self _syncDrawableQueue:^{
+         os_unfair_lock_lock(&self->_drawableLock);
+         self->_prefetchedDrawable = nil;
+         self->_prefetchedDrawableCaptureCompatible = false;
+         os_unfair_lock_unlock(&self->_drawableLock);
+      }];
+   }
+}
+
+- (bool)nonBlockingFrameAcquisition
+{
+   return atomic_load_explicit(
+         &_nonBlockingFrameAcquisition, memory_order_acquire);
 }
 
 #pragma mark - shaders
@@ -563,10 +673,208 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
    return t;
 }
 
+- (void)_scheduleDrawablePrefetch
+{
+   bool expected = false;
+   bool mailboxFull;
+
+   if (!atomic_load_explicit(
+            &_nonBlockingFrameAcquisition, memory_order_acquire) ||
+         atomic_load_explicit(
+            &_drawablePrefetchPaused, memory_order_acquire))
+      return;
+
+   os_unfair_lock_lock(&_drawableLock);
+   mailboxFull = _prefetchedDrawable != nil;
+   os_unfair_lock_unlock(&_drawableLock);
+   if (mailboxFull)
+      return;
+
+   if (!atomic_compare_exchange_strong_explicit(
+            &_drawablePrefetchInFlight,
+            &expected,
+            true,
+            memory_order_acq_rel,
+            memory_order_relaxed))
+      return;
+
+   dispatch_async(_drawableQueue, ^{
+      CFTimeInterval startedAt = CACurrentMediaTime();
+      bool captureCompatible = false;
+      bool skippedAcquisition = false;
+      joyemu_cadence_trace_token_t drawableTrace =
+         joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_NEXT_DRAWABLE_WAIT);
+      id<CAMetalDrawable> drawable = nil;
+
+      if (atomic_load_explicit(
+               &self->_nonBlockingFrameAcquisition, memory_order_acquire) &&
+            !atomic_load_explicit(
+               &self->_drawablePrefetchPaused, memory_order_acquire))
+      {
+         captureCompatible = atomic_load_explicit(
+               &self->_captureEnabled, memory_order_acquire);
+         drawable = [self->_layer nextDrawable];
+         if (drawable && atomic_load_explicit(
+               &self->_nonBlockingFrameAcquisition, memory_order_acquire) &&
+               !atomic_load_explicit(
+                  &self->_drawablePrefetchPaused, memory_order_acquire))
+         {
+            os_unfair_lock_lock(&self->_drawableLock);
+            if (self->_prefetchedDrawable == nil)
+            {
+               self->_prefetchedDrawable = drawable;
+               self->_prefetchedDrawableCaptureCompatible =
+                  captureCompatible;
+            }
+            os_unfair_lock_unlock(&self->_drawableLock);
+         }
+      }
+      else
+         skippedAcquisition = true;
+      joyemu_cadence_trace_end(
+            JOYEMU_CADENCE_TRACE_NEXT_DRAWABLE_WAIT, drawableTrace);
+      uint64_t waitUs = (uint64_t)(
+            (CACurrentMediaTime() - startedAt) * 1000000.0);
+
+      if (waitUs > 1000)
+         atomic_fetch_add_explicit(
+               &self->_drawableWaitExceededBudget, 1, memory_order_relaxed);
+
+      atomic_store_explicit(
+            &self->_drawablePrefetchInFlight, false, memory_order_release);
+
+      /* Close completion races with both mailbox consumption and a temporary
+       * capture transition without polling when nextDrawable returns nil. */
+      if (drawable || skippedAcquisition)
+         [self _scheduleDrawablePrefetch];
+   });
+}
+
+- (id<CAMetalDrawable>)_takePrefetchedDrawableCaptureCompatible:
+      (bool *)captureCompatible
+{
+   id<CAMetalDrawable> drawable;
+   bool compatible;
+
+   os_unfair_lock_lock(&_drawableLock);
+   drawable = _prefetchedDrawable;
+   compatible = _prefetchedDrawableCaptureCompatible;
+   _prefetchedDrawable = nil;
+   _prefetchedDrawableCaptureCompatible = false;
+   os_unfair_lock_unlock(&_drawableLock);
+
+   if (captureCompatible)
+      *captureCompatible = compatible;
+   return drawable;
+}
+
+- (id<CAMetalDrawable>)_blockingDrawable
+{
+   __block bool captureCompatible = false;
+   __block id<CAMetalDrawable> drawable =
+      [self _takePrefetchedDrawableCaptureCompatible:&captureCompatible];
+
+   if (drawable)
+   {
+      _drawableCaptureCompatible = captureCompatible;
+      return drawable;
+   }
+
+   [self _syncDrawableQueue:^{
+      drawable = [self _takePrefetchedDrawableCaptureCompatible:
+            &captureCompatible];
+      if (drawable == nil)
+      {
+         joyemu_cadence_trace_token_t drawableTrace =
+            joyemu_cadence_trace_begin(
+                  JOYEMU_CADENCE_TRACE_NEXT_DRAWABLE_WAIT);
+         captureCompatible = atomic_load_explicit(
+               &self->_captureEnabled, memory_order_acquire);
+         drawable = [self->_layer nextDrawable];
+         joyemu_cadence_trace_end(
+               JOYEMU_CADENCE_TRACE_NEXT_DRAWABLE_WAIT, drawableTrace);
+      }
+   }];
+   _drawableCaptureCompatible = captureCompatible;
+   return drawable;
+}
+
+- (void)_syncDrawableQueue:(dispatch_block_t)block
+{
+   if (dispatch_get_specific(&g_joyemuMetalDrawableQueueKey) ==
+         (__bridge void *)self)
+      block();
+   else
+      dispatch_sync(_drawableQueue, block);
+}
+
+- (void)_recordFrameBeginResult:(JEFrameBeginResult)result
+{
+   uint64_t attempts = atomic_fetch_add_explicit(
+         &_frameBeginAttempts, 1, memory_order_relaxed) + 1;
+
+   switch (result)
+   {
+      case JEFrameBeginResultReady:
+         atomic_fetch_add_explicit(
+               &_frameBeginReady, 1, memory_order_relaxed);
+         break;
+      case JEFrameBeginResultNoRenderToken:
+         atomic_fetch_add_explicit(
+               &_frameBeginNoRenderToken, 1, memory_order_relaxed);
+         break;
+      case JEFrameBeginResultNoInflightSlot:
+         atomic_fetch_add_explicit(
+               &_frameBeginNoInflightSlot, 1, memory_order_relaxed);
+         break;
+      case JEFrameBeginResultDrawableUnavailable:
+         atomic_fetch_add_explicit(
+               &_frameBeginDrawableUnavailable, 1, memory_order_relaxed);
+         break;
+      case JEFrameBeginResultDrawableWaitExceededBudget:
+         atomic_fetch_add_explicit(
+               &_drawableWaitExceededBudget, 1, memory_order_relaxed);
+         break;
+   }
+
+   if ((attempts % 360) == 0)
+   {
+      uint64_t ready = atomic_exchange_explicit(
+            &_frameBeginReady, 0, memory_order_relaxed);
+      uint64_t noToken = atomic_exchange_explicit(
+            &_frameBeginNoRenderToken, 0, memory_order_relaxed);
+      uint64_t noSlot = atomic_exchange_explicit(
+            &_frameBeginNoInflightSlot, 0, memory_order_relaxed);
+      uint64_t noDrawable = atomic_exchange_explicit(
+            &_frameBeginDrawableUnavailable, 0, memory_order_relaxed);
+      uint64_t overBudget = atomic_exchange_explicit(
+            &_drawableWaitExceededBudget, 0, memory_order_relaxed);
+
+      RARCH_LOG(
+            "[JEMetalBackpressure] nonblock=1 attempts=360 ready=%llu "
+            "noRenderToken=%llu renderDroppedNoSlot=%llu "
+            "drawableUnavailable=%llu drawableWaitOver1ms=%llu\n",
+            (unsigned long long)ready,
+            (unsigned long long)noToken,
+            (unsigned long long)noSlot,
+            (unsigned long long)noDrawable,
+            (unsigned long long)overBudget);
+   }
+}
+
 - (id<CAMetalDrawable>)nextDrawable
 {
    if (_drawable == nil)
-      _drawable = _layer.nextDrawable;
+   {
+      bool requestedNonBlocking = atomic_load_explicit(
+            &_nonBlockingFrameAcquisition, memory_order_acquire);
+      bool captureEnabled = atomic_load_explicit(
+            &_captureEnabled, memory_order_acquire);
+      if (joyemu_metal_should_use_nonblocking_acquisition(
+            requestedNonBlocking, captureEnabled))
+         return nil;
+      _drawable = [self _blockingDrawable];
+   }
    return _drawable;
 }
 
@@ -597,16 +905,39 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
 
 - (void)setCaptureEnabled:(bool)captureEnabled
 {
-   if (_captureEnabled == captureEnabled)
+   if (atomic_load_explicit(&_captureEnabled, memory_order_acquire) ==
+         captureEnabled)
       return;
 
-   _captureEnabled        = captureEnabled;
-   _layer.framebufferOnly = !captureEnabled;
+   /* A prefetched drawable preserves the framebufferOnly mode it had when
+    * nextDrawable returned. Pause new requests and place the transition on
+    * the same serial queue so every old-mode drawable is completed first. */
+   atomic_store_explicit(
+         &_drawablePrefetchPaused, true, memory_order_release);
+   [self _syncDrawableQueue:^{
+      os_unfair_lock_lock(&self->_drawableLock);
+      self->_prefetchedDrawable = nil;
+      self->_prefetchedDrawableCaptureCompatible = false;
+      os_unfair_lock_unlock(&self->_drawableLock);
+      self->_backBuffer = nil;
+      self->_backBufferCaptureCompatible = false;
+      self->_layer.framebufferOnly = !captureEnabled;
+      atomic_store_explicit(
+            &self->_captureEnabled, captureEnabled, memory_order_release);
+   }];
+
+   if (atomic_load_explicit(
+         &_nonBlockingFrameAcquisition, memory_order_acquire))
+   {
+      atomic_store_explicit(
+            &_drawablePrefetchPaused, false, memory_order_release);
+      [self _scheduleDrawablePrefetch];
+   }
 }
 
 - (bool)captureEnabled
 {
-   return _captureEnabled;
+   return atomic_load_explicit(&_captureEnabled, memory_order_acquire);
 }
 
 - (bool)readBackBuffer:(uint8_t *)buffer
@@ -615,7 +946,10 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
    NSUInteger dstStride, srcStride;
    uint8_t const *src;
    uint8_t *dst, *tmp;
-   if (!_captureEnabled || _backBuffer == nil)
+   if (buffer == NULL ||
+         !atomic_load_explicit(&_captureEnabled, memory_order_acquire) ||
+         _backBuffer == nil ||
+         !_backBufferCaptureCompatible)
       return NO;
 
    if (_backBuffer.pixelFormat != MTLPixelFormatBGRA8Unorm)
@@ -624,7 +958,19 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
       return NO;
    }
 
+   if (_viewport.x > _backBuffer.width ||
+         _viewport.y > _backBuffer.height ||
+         _viewport.width > _backBuffer.width - _viewport.x ||
+         _viewport.height > _backBuffer.height - _viewport.y)
+   {
+      RARCH_WARN(
+            "[Metal] Capture viewport is outside the readable back buffer.\n");
+      return NO;
+   }
+
    tmp = malloc(_backBuffer.width * _backBuffer.height * 4);
+   if (!tmp)
+      return NO;
 
    [_backBuffer getBytes:tmp
              bytesPerRow:4 * _backBuffer.width
@@ -652,13 +998,79 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
    return YES;
 }
 
-- (void)begin
+- (JEFrameBeginResult)begin
 {
+   bool requestedNonBlocking = atomic_load_explicit(
+         &_nonBlockingFrameAcquisition, memory_order_acquire);
+   bool captureEnabled = atomic_load_explicit(
+         &_captureEnabled, memory_order_acquire);
+   bool nonBlocking = joyemu_metal_should_use_nonblocking_acquisition(
+         requestedNonBlocking, captureEnabled);
+
    assert(_commandBuffer == nil);
-   dispatch_semaphore_wait(_inflightSemaphore, DISPATCH_TIME_FOREVER);
+   assert(_drawable == nil);
+   assert(_rce == nil);
+   _drawableCaptureCompatible = false;
+
+   joyemu_cadence_trace_token_t semaphoreTrace =
+      joyemu_cadence_trace_begin(
+            JOYEMU_CADENCE_TRACE_METAL_SEMAPHORE_WAIT);
+   intptr_t semaphoreResult = dispatch_semaphore_wait(
+         _inflightSemaphore,
+         nonBlocking
+            ? DISPATCH_TIME_NOW
+            : DISPATCH_TIME_FOREVER);
+   joyemu_cadence_trace_end(
+         JOYEMU_CADENCE_TRACE_METAL_SEMAPHORE_WAIT, semaphoreTrace);
+
+   if (semaphoreResult != 0)
+   {
+      if (nonBlocking)
+         joyemu_metal_render_token_try_consume();
+      [self _scheduleDrawablePrefetch];
+      [self _recordFrameBeginResult:JEFrameBeginResultNoInflightSlot];
+      return JEFrameBeginResultNoInflightSlot;
+   }
+
+   if (nonBlocking)
+   {
+      _drawable = [self _takePrefetchedDrawableCaptureCompatible:
+            &_drawableCaptureCompatible];
+      [self _scheduleDrawablePrefetch];
+      if (_drawable == nil)
+      {
+         JEFrameBeginResult unavailableResult =
+            joyemu_metal_render_token_try_consume()
+               ? JEFrameBeginResultDrawableUnavailable
+               : JEFrameBeginResultNoRenderToken;
+         dispatch_semaphore_signal(_inflightSemaphore);
+         [self _recordFrameBeginResult:unavailableResult];
+         return unavailableResult;
+      }
+      /* A ready mailbox drawable is itself a valid render opportunity.
+       * Consume any pending display tick only to prevent stale classification;
+       * never drop a ready drawable solely because callback phases differ. */
+      joyemu_metal_render_token_try_consume();
+   }
+
    _commandBuffer = [_commandQueue commandBuffer];
+   if (_commandBuffer == nil)
+   {
+      _drawable = nil;
+      dispatch_semaphore_signal(_inflightSemaphore);
+      if (nonBlocking)
+         [self _recordFrameBeginResult:
+               JEFrameBeginResultDrawableUnavailable];
+      return JEFrameBeginResultDrawableUnavailable;
+   }
+
    _commandBuffer.label = @"Frame command buffer";
    _backBuffer = nil;
+   _backBufferCaptureCompatible = false;
+
+   if (nonBlocking)
+      [self _recordFrameBeginResult:JEFrameBeginResultReady];
+   return JEFrameBeginResultReady;
 }
 
 - (id<MTLRenderCommandEncoder>)rce
@@ -666,12 +1078,20 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
    assert(_commandBuffer != nil);
    if (_rce == nil)
    {
+      id<CAMetalDrawable> drawable = self.nextDrawable;
+      bool captureEnabled = atomic_load_explicit(
+            &_captureEnabled, memory_order_acquire);
       MTLRenderPassDescriptor *rpd = [MTLRenderPassDescriptor new];
       rpd.colorAttachments[0].clearColor = _clearColor;
       rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
-      rpd.colorAttachments[0].texture = self.nextDrawable.texture;
-      if (_captureEnabled)
-         _backBuffer = self.nextDrawable.texture;
+      rpd.colorAttachments[0].texture = drawable.texture;
+      if (captureEnabled && _drawableCaptureCompatible)
+      {
+         _backBuffer = drawable.texture;
+         _backBufferCaptureCompatible = true;
+      }
+      else if (captureEnabled && drawable)
+         RARCH_WARN("[Metal] Capture skipped an unreadable drawable.\n");
       _rce       = [_commandBuffer renderCommandEncoderWithDescriptor:rpd];
       _rce.label = @"Frame command encoder";
    }
@@ -734,7 +1154,7 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
    if (_blitCommandBuffer)
    {
 #ifdef OSX
-      if (_captureEnabled)
+      if (atomic_load_explicit(&_captureEnabled, memory_order_acquire))
       {
          id<MTLBlitCommandEncoder> bce = [_blitCommandBuffer blitCommandEncoder];
          [bce synchronizeResource:_backBuffer];
@@ -760,13 +1180,17 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
 
    if (self.nextDrawable)
    {
+      joyemu_cadence_trace_token_t present_trace =
+         joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_PRESENT);
       [_commandBuffer presentDrawable:self.nextDrawable];
+      joyemu_cadence_trace_end(JOYEMU_CADENCE_TRACE_PRESENT, present_trace);
    }
 
    [_commandBuffer commit];
 
    _commandBuffer = nil;
    _drawable = nil;
+   _drawableCaptureCompatible = false;
    [self _nextChain];
 }
 

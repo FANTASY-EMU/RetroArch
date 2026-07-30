@@ -25,9 +25,8 @@
 
 #include "../../gfx_display.h"
 
-/* TODO/FIXME: implement triple buffering */
 /*! @brief maximum inflight frames */
-#define MAX_INFLIGHT 1
+#define MAX_INFLIGHT 3
 #define CHAIN_LENGTH 3
 
 /* macOS requires constants in a buffer to have a 256 byte alignment. */
@@ -85,6 +84,25 @@ typedef NS_ENUM(NSUInteger, ViewportResetMode) {
    kVideoViewport
 };
 
+typedef NS_ENUM(NSUInteger, JEFrameBeginResult) {
+   JEFrameBeginResultReady,
+   JEFrameBeginResultNoRenderToken,
+   JEFrameBeginResultNoInflightSlot,
+   JEFrameBeginResultDrawableUnavailable,
+   JEFrameBeginResultDrawableWaitExceededBudget,
+};
+
+static inline bool joyemu_metal_should_use_nonblocking_acquisition(
+      bool requested,
+      bool capture_enabled)
+{
+   return requested && !capture_enabled;
+}
+
+FOUNDATION_EXPORT void joyemu_metal_render_token_publish(void);
+FOUNDATION_EXPORT bool joyemu_metal_render_token_try_consume(void);
+FOUNDATION_EXPORT void joyemu_metal_render_token_reset(void);
+
 /*! @brief Context contains the render state used by various components */
 @interface Context : NSObject
 
@@ -96,6 +114,9 @@ typedef NS_ENUM(NSUInteger, ViewportResetMode) {
 
 /*! @brief Specifies whether rendering is synchronized with the display */
 @property (nonatomic, readwrite) bool displaySyncEnabled;
+
+/*! @brief When enabled, frame acquisition must never wait on the simulation thread. */
+@property (nonatomic, readwrite) bool nonBlockingFrameAcquisition;
 
 /*! @brief captureEnabled allows previous frames to be read */
 @property (nonatomic, readwrite) bool captureEnabled;
@@ -134,7 +155,7 @@ typedef NS_ENUM(NSUInteger, ViewportResetMode) {
 - (bool)allocRange:(BufferRange *)range length:(NSUInteger)length;
 
 /*! @brief begin marks the beginning of a frame */
-- (void)begin;
+- (JEFrameBeginResult)begin;
 
 /*! @brief end commits the command buffer */
 - (void)end;

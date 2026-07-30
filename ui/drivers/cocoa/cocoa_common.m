@@ -49,6 +49,11 @@
 #include "../../../retroarch.h"
 #include "../../../tasks/task_content.h"
 #include "../../../verbosity.h"
+#include "../../../joyemu_cadence_trace_compat.h"
+
+#ifdef HAVE_COCOA_METAL
+#include "../../../gfx/common/metal/metal_common.h"
+#endif
 
 #include "../../input/drivers/cocoa_input.h"
 #include "../../input/drivers_keyboard/keyboard_event_apple.h"
@@ -188,7 +193,13 @@ void rarch_stop_draw_observer(void)
 
    uint32_t runloop_flags = runloop_get_flags();
    if (!(runloop_flags & RUNLOOP_FLAG_IDLE))
+   {
+      joyemu_cadence_trace_mark_gap(JOYEMU_CADENCE_TRACE_DISPLAY_TICK_GAP);
+#ifdef HAVE_COCOA_METAL
+      joyemu_metal_render_token_publish();
+#endif
       CFRunLoopWakeUp(CFRunLoopGetMain());
+   }
 #endif
 }
 #endif
