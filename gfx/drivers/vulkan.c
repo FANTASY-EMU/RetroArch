@@ -4585,6 +4585,125 @@ static void vulkan_run_hdr_pipeline(VkPipeline pipeline, VkRenderPass render_pas
    vkCmdEndRenderPass(vk->cmd);
 }
 
+enum vulkan_resize_stage
+{
+   VULKAN_RESIZE_STAGE_NONE = 0,
+   VULKAN_RESIZE_STAGE_BEFORE_SUBMISSION,
+   VULKAN_RESIZE_STAGE_AFTER_SUBMISSION
+};
+
+static unsigned vulkan_get_resize_stage(
+      bool resize_pending,
+      unsigned current_width,
+      unsigned current_height,
+      unsigned requested_width,
+      unsigned requested_height)
+{
+   if (!resize_pending)
+      return VULKAN_RESIZE_STAGE_NONE;
+
+#if defined(IOS) && defined(JOYENGINE_V2)
+   /* CAMetalLayer updates its attachments synchronously when an external
+    * display is disconnected. Submitting the previous, larger render target
+    * before recreating the swapchain then fails Metal validation. Growing is
+    * safe for one frame and retains the existing end-of-frame resize path. */
+   if (      requested_width  < current_width
+         || requested_height < current_height)
+      return VULKAN_RESIZE_STAGE_BEFORE_SUBMISSION;
+#endif
+
+   return VULKAN_RESIZE_STAGE_AFTER_SUBMISSION;
+}
+
+#if defined(DEBUG) && defined(IOS) && defined(JOYENGINE_V2)
+__attribute__((used, visibility("default")))
+unsigned joyemu_vulkan_resize_stage_for_testing(
+      bool resize_pending,
+      unsigned current_width,
+      unsigned current_height,
+      unsigned requested_width,
+      unsigned requested_height)
+{
+   return vulkan_get_resize_stage(
+         resize_pending,
+         current_width,
+         current_height,
+         requested_width,
+         requested_height);
+}
+#endif
+
+static void vulkan_process_pending_resize(
+      vk_t *vk,
+      unsigned width,
+      unsigned height,
+      unsigned video_width,
+      unsigned video_height,
+      video_frame_info_t *video_info)
+{
+   bool resize_pending = (vk->flags & VK_FLAG_SHOULD_RESIZE) != 0;
+#ifdef VULKAN_HDR_SWAPCHAIN
+   bool video_hdr_enable =
+         video_driver_supports_hdr() && video_info->hdr_enable;
+   resize_pending =
+         resize_pending
+         || (((vk->context->flags & VK_CTX_FLAG_HDR_ENABLE) > 0)
+         != video_hdr_enable);
+#endif
+
+   if (resize_pending)
+   {
+#ifdef VULKAN_HDR_SWAPCHAIN
+      if (video_hdr_enable)
+      {
+         vk->context->flags |= VK_CTX_FLAG_HDR_ENABLE;
+#ifdef HAVE_THREADS
+         slock_lock(vk->context->queue_lock);
+#endif
+         vkQueueWaitIdle(vk->context->queue);
+#ifdef HAVE_THREADS
+         slock_unlock(vk->context->queue_lock);
+#endif
+         vulkan_destroy_hdr_buffer(
+               vk->context->device, &vk->main_buffer);
+         vulkan_destroy_hdr_buffer(
+               vk->context->device, &vk->readback_image);
+      }
+      else
+         vk->context->flags &= ~VK_CTX_FLAG_HDR_ENABLE;
+#endif /* VULKAN_HDR_SWAPCHAIN */
+
+      if (vk->ctx_driver->set_resize)
+         vk->ctx_driver->set_resize(vk->ctx_data, width, height);
+
+#ifdef VULKAN_HDR_SWAPCHAIN
+      if (vk->context->flags & VK_CTX_FLAG_HDR_ENABLE)
+      {
+         /* Create intermediary buffer to render filter chain output to */
+         vulkan_init_render_target(
+               &vk->main_buffer,
+               video_width,
+               video_height,
+               vk->context->swapchain_format,
+               vk->render_pass,
+               vk->context);
+         /* Create image for readback target in bgra8 format */
+         vulkan_init_render_target(
+               &vk->readback_image,
+               video_width,
+               video_height,
+               VK_FORMAT_B8G8R8A8_UNORM,
+               vk->readback_render_pass,
+               vk->context);
+      }
+#endif /* VULKAN_HDR_SWAPCHAIN */
+      vk->flags &= ~VK_FLAG_SHOULD_RESIZE;
+   }
+
+   if (vk->context->flags & VK_CTX_FLAG_INVALID_SWAPCHAIN)
+      vulkan_check_swapchain(vk);
+}
+
 static bool vulkan_frame(void *data, const void *frame,
       unsigned frame_width, unsigned frame_height,
       uint64_t frame_count,
@@ -4619,10 +4738,8 @@ static bool vulkan_frame(void *data, const void *frame,
 #ifdef HAVE_GFX_WIDGETS
    bool widgets_active                           = video_info->widgets_active;
 #endif
-   unsigned frame_index                          =
-      vk->context->current_frame_index;
-   unsigned swapchain_index                      =
-      vk->context->current_swapchain_index;
+   unsigned frame_index;
+   unsigned swapchain_index;
    bool overlay_behind_menu                      = video_info->overlay_behind_menu;
    bool use_main_buffer                          = true;
 
@@ -4643,6 +4760,31 @@ static bool vulkan_frame(void *data, const void *frame,
    if (!filter_chain && vk->filter_chain_default)
       filter_chain = vk->filter_chain_default;
 
+#if defined(IOS) && defined(JOYENGINE_V2)
+   if (vulkan_get_resize_stage(
+            (vk->flags & VK_FLAG_SHOULD_RESIZE) != 0,
+            vk->context->swapchain_width,
+            vk->context->swapchain_height,
+            width,
+            height) == VULKAN_RESIZE_STAGE_BEFORE_SUBMISSION)
+   {
+      RARCH_LOG(
+            "[JoyEmu][VulkanResize] stage=pre_submit current=%ux%u "
+            "requested=%ux%u\n",
+            vk->context->swapchain_width,
+            vk->context->swapchain_height,
+            width,
+            height);
+      vulkan_process_pending_resize(
+            vk,
+            width,
+            height,
+            video_width,
+            video_height,
+            video_info);
+   }
+#endif
+
 #ifdef VULKAN_HDR_SWAPCHAIN
    use_main_buffer                               =
          ( vk->context->flags & VK_CTX_FLAG_HDR_ENABLE)
@@ -4650,6 +4792,10 @@ static bool vulkan_frame(void *data, const void *frame,
 #endif /* VULKAN_HDR_SWAPCHAIN */
 
    /* Bookkeeping on start of frame. */
+   frame_index                                   =
+      vk->context->current_frame_index;
+   swapchain_index                               =
+      vk->context->current_swapchain_index;
    struct vk_per_frame *chain                    = &vk->swapchain[frame_index];
    struct vk_image *backbuffer                   = &vk->backbuffers[swapchain_index];
    struct vk_descriptor_manager *manager         = &chain->descriptor_manager;
@@ -5246,59 +5392,16 @@ static bool vulkan_frame(void *data, const void *frame,
          vk->ctx_driver->update_window_title(vk->ctx_data);
    }
 
-   /* Handle spurious swapchain invalidations as soon as we can,
-    * i.e. right after swap buffers. */
-#ifdef VULKAN_HDR_SWAPCHAIN
-   bool video_hdr_enable = video_driver_supports_hdr() && video_info->hdr_enable;
-   if (       (vk->flags & VK_FLAG_SHOULD_RESIZE)
-         || (((vk->context->flags & VK_CTX_FLAG_HDR_ENABLE) > 0)
-         != video_hdr_enable))
-#else
-   if (vk->flags & VK_FLAG_SHOULD_RESIZE)
-#endif /* VULKAN_HDR_SWAPCHAIN */
-   {
-#ifdef VULKAN_HDR_SWAPCHAIN
-      if (video_hdr_enable)
-      {
-         vk->context->flags |= VK_CTX_FLAG_HDR_ENABLE;
-#ifdef HAVE_THREADS
-         slock_lock(vk->context->queue_lock);
-#endif
-         vkQueueWaitIdle(vk->context->queue);
-#ifdef HAVE_THREADS
-         slock_unlock(vk->context->queue_lock);
-#endif
-         vulkan_destroy_hdr_buffer(vk->context->device, &vk->main_buffer);
-         vulkan_destroy_hdr_buffer(vk->context->device, &vk->readback_image);
-      }
-      else
-         vk->context->flags &= ~VK_CTX_FLAG_HDR_ENABLE;
-
-#endif /* VULKAN_HDR_SWAPCHAIN */
-
-      gfx_ctx_mode_t mode;
-      mode.width  = width;
-      mode.height = height;
-
-      if (vk->ctx_driver->set_resize)
-         vk->ctx_driver->set_resize(vk->ctx_data, mode.width, mode.height);
-
-#ifdef VULKAN_HDR_SWAPCHAIN
-      if (vk->context->flags & VK_CTX_FLAG_HDR_ENABLE)
-      {
-         /* Create intermediary buffer to render filter chain output to */
-         vulkan_init_render_target(&vk->main_buffer, video_width, video_height,
-                                  vk->context->swapchain_format, vk->render_pass, vk->context);
-         /* Create image for readback target in bgra8 format */
-         vulkan_init_render_target(&vk->readback_image, video_width, video_height,
-                                    VK_FORMAT_B8G8R8A8_UNORM, vk->readback_render_pass, vk->context);
-      }
-#endif /* VULKAN_HDR_SWAPCHAIN */
-      vk->flags &= ~VK_FLAG_SHOULD_RESIZE;
-   }
-
-   if (vk->context->flags & VK_CTX_FLAG_INVALID_SWAPCHAIN)
-      vulkan_check_swapchain(vk);
+   /* Handle growth and spurious invalidations after the submitted frame.
+    * JoyEngine iOS shrink transitions were already handled before submission,
+    * because their CAMetalLayer attachments become smaller synchronously. */
+   vulkan_process_pending_resize(
+         vk,
+         width,
+         height,
+         video_width,
+         video_height,
+         video_info);
 
    /* Disable BFI during fast forward, slow-motion,
     * pause, and menu to prevent flicker. */

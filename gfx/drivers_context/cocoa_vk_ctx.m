@@ -130,10 +130,26 @@ static void cocoa_vk_gfx_ctx_get_video_size(void *data,
 static void cocoa_vk_gfx_ctx_get_video_size(void *data,
       unsigned* width, unsigned* height)
 {
-    float screenscale               = cocoa_screen_get_native_scale();
-    CGRect size                     = [apple_platform.renderView bounds];
-    *width                          = CGRectGetWidth(size)  * screenscale;
-    *height                         = CGRectGetHeight(size) * screenscale;
+    MetalLayerView *view            = (MetalLayerView *)apple_platform.renderView;
+    UIScreen *screen                = view.window.screen ?: [UIScreen mainScreen];
+    CGFloat screenscale             = view.contentScaleFactor;
+    if (!isfinite(screenscale) || screenscale <= 0.0)
+       screenscale                  = screen.nativeScale;
+    if (!isfinite(screenscale) || screenscale <= 0.0)
+       screenscale                  = screen.scale;
+    if (!isfinite(screenscale) || screenscale <= 0.0)
+       screenscale                  = 1.0;
+
+    /* The view may be resized by the phone skin after set_video_mode. Its
+     * previous CAMetalLayer.drawableSize is therefore stale until the normal
+     * Vulkan resize path recreates the swapchain. The current bounds and
+     * content scale are the source of truth; external-display migration sets
+     * that scale explicitly when applying its drawable budget. */
+    CGRect size                     = view.bounds;
+    *width                          = (unsigned)llround(
+          CGRectGetWidth(size) * screenscale);
+    *height                         = (unsigned)llround(
+          CGRectGetHeight(size) * screenscale);
 }
 #endif
 
@@ -289,6 +305,7 @@ static void *cocoa_vk_gfx_ctx_init(void *video_driver)
 static bool cocoa_vk_gfx_ctx_set_video_mode(void *data,
       unsigned width, unsigned height, bool fullscreen)
 {
+   gfx_ctx_mode_t mode;
    id g_view                      = apple_platform.renderView;
    cocoa_vk_ctx_data_t *cocoa_ctx = (cocoa_vk_ctx_data_t*)data;
    cocoa_ctx->width               = width;
@@ -305,6 +322,11 @@ static bool cocoa_vk_gfx_ctx_set_video_mode(void *data,
       RARCH_ERR("[Vulkan] Failed to create surface.\n");
       return false;
    }
+
+   mode.width                     = width;
+   mode.height                    = height;
+   mode.fullscreen                = fullscreen;
+   [apple_platform setVideoMode:mode];
 
    /* TODO: Maybe iOS users should be able to
     * show/hide the status bar here? */
