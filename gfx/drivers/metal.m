@@ -868,6 +868,10 @@ font_renderer_t metal_raster_font = {
 @property(nonatomic) CGSize joyExternalDisplayMaximumDrawableSize;
 @end
 
+@interface MetalDriver (JoyEMUExternalDisplay)
+- (BOOL)joyemuUsesRGB32SoftwareFrame;
+@end
+
 @implementation MetalView
 
 #if !defined(HAVE_COCOATOUCH)
@@ -930,6 +934,11 @@ font_renderer_t metal_raster_font = {
    CGRect _skinVideoPrimaryFrame;
    NSArray<NSValue *> *_skinVideoEffectFrames;
    SkinVideoEffectUniforms _skinVideoEffectUniforms;
+}
+
+- (BOOL)joyemuUsesRGB32SoftwareFrame
+{
+   return _video.rgb32;
 }
 
 - (instancetype)initWithVideo:(const video_info_t *)video
@@ -2780,6 +2789,21 @@ static bool metal_frame(void *data, const void *frame,
       video_frame_info_t *video_info)
 {
    MetalDriver *md = (__bridge MetalDriver *)data;
+#if TARGET_OS_IPHONE && defined(HAVE_COCOATOUCH)
+   if (frame
+       && frame != RETRO_HW_FRAME_BUFFER_VALID
+       && frame_width > 0
+       && frame_height > 0
+       && pitch > 0)
+   {
+      joyemu_external_display_submit_software_frame(
+            frame,
+            frame_width,
+            frame_height,
+            pitch,
+            [md joyemuUsesRGB32SoftwareFrame]);
+   }
+#endif
    return [md renderFrame:frame
                      data:data
                     width:frame_width

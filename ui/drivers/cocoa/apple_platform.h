@@ -1,6 +1,8 @@
 #ifndef COCOA_APPLE_PLATFORM_H
 #define COCOA_APPLE_PLATFORM_H
 
+#include <stdbool.h>
+
 extern bool RAIsVoiceOverRunning(void);
 
 #if TARGET_OS_TV
@@ -26,6 +28,20 @@ extern void ios_keyboard_end(void);
 
 #if TARGET_OS_OSX
 extern void osx_show_file_sheet(void);
+#endif
+
+#if (TARGET_OS_IPHONE || defined(IOS)) && defined(HAVE_COCOATOUCH)
+void joyemu_external_display_submit_software_frame(
+      const void *pixels,
+      unsigned width,
+      unsigned height,
+      unsigned pitch_bytes,
+      bool rgb32);
+void joyemu_external_display_submit_vulkan_frame(
+      const void *metal_texture,
+      const void *metal_command_queue);
+void joyemu_external_display_observe_vulkan_frame_source(void);
+bool joyemu_external_display_wants_vulkan_frames(void);
 #endif
 
 #ifdef __OBJC__
@@ -84,7 +100,7 @@ extern id<ApplePlatform> apple_platform;
 extern id apple_platform;
 #endif
 
-#if TARGET_OS_IPHONE && defined(HAVE_COCOATOUCH)
+#if (TARGET_OS_IPHONE || defined(IOS)) && defined(HAVE_COCOATOUCH)
 void rarch_start_draw_observer(void);
 void rarch_stop_draw_observer(void);
 

@@ -55,6 +55,7 @@
 #include <ctype.h>
 #include <math.h>
 #include <locale.h>
+#include <stdatomic.h>
 
 #include <boolean.h>
 #include <clamping.h>
@@ -1462,6 +1463,76 @@ static void driver_adjust_system_rates(
  * If nonblock state is false, sets
  * blocking state for both audio and video drivers instead.
  **/
+static atomic_bool g_joyemu_external_display_video_nonblock =
+   ATOMIC_VAR_INIT(false);
+
+static bool joyemu_driver_should_video_nonblock(
+      bool input_nonblock,
+      bool video_vsync,
+      bool runloop_force_nonblock,
+      bool external_display_video_nonblock)
+{
+   return input_nonblock
+      || !video_vsync
+      || runloop_force_nonblock
+      || external_display_video_nonblock;
+}
+
+static bool joyemu_driver_should_audio_nonblock(
+      bool input_nonblock,
+      bool audio_sync)
+{
+   return audio_sync ? input_nonblock : true;
+}
+
+bool joyemu_driver_external_display_video_nonblock_enabled(void)
+{
+   return atomic_load_explicit(
+         &g_joyemu_external_display_video_nonblock,
+         memory_order_acquire);
+}
+
+void joyemu_driver_set_external_display_video_nonblock(bool enabled)
+{
+   bool previous = atomic_exchange_explicit(
+         &g_joyemu_external_display_video_nonblock,
+         enabled,
+         memory_order_acq_rel);
+
+   if (previous == enabled)
+      return;
+
+   RARCH_LOG(
+         "[JoyEMU ExternalDisplay] video nonblock override=%d\n",
+         enabled ? 1 : 0);
+   if (!config_get_ptr())
+      return;
+
+   driver_set_nonblock_state();
+}
+
+#if DEBUG
+bool joyemu_driver_video_nonblock_for_testing(
+      bool input_nonblock,
+      bool video_vsync,
+      bool runloop_force_nonblock,
+      bool external_display_video_nonblock)
+{
+   return joyemu_driver_should_video_nonblock(
+         input_nonblock,
+         video_vsync,
+         runloop_force_nonblock,
+         external_display_video_nonblock);
+}
+
+bool joyemu_driver_audio_nonblock_for_testing(
+      bool input_nonblock,
+      bool audio_sync)
+{
+   return joyemu_driver_should_audio_nonblock(input_nonblock, audio_sync);
+}
+#endif
+
 void driver_set_nonblock_state(void)
 {
    runloop_state_t *runloop_st = runloop_state_get_ptr();
@@ -1482,11 +1553,16 @@ void driver_set_nonblock_state(void)
    bool video_driver_active    = (video_st->flags  & VIDEO_FLAG_ACTIVE) ? true : false;
    bool audio_driver_active    = (audio_st->flags  & AUDIO_FLAG_ACTIVE) ? true : false;
    bool runloop_force_nonblock = (runloop_st->flags & RUNLOOP_FLAG_FORCE_NONBLOCK) ? true : false;
-   bool video_nonblock         = enable;
-   bool audio_nonblock         = audio_sync ? enable : true;
-
-   if (!video_vsync || runloop_force_nonblock)
-      video_nonblock = true;
+   bool external_video_nonblock =
+      joyemu_driver_external_display_video_nonblock_enabled();
+   bool video_nonblock         = joyemu_driver_should_video_nonblock(
+         enable,
+         video_vsync,
+         runloop_force_nonblock,
+         external_video_nonblock);
+   bool audio_nonblock         = joyemu_driver_should_audio_nonblock(
+         enable,
+         audio_sync);
 
    /* Only apply non-block-state for video if we're using vsync. */
    if (video_driver_active && VIDEO_DRIVER_GET_PTR_INTERNAL(video_st))
