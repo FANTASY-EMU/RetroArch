@@ -4979,6 +4979,46 @@ static struct vk_external_capture *vulkan_record_external_capture(
    capture->layout = VK_IMAGE_LAYOUT_GENERAL;
    return capture;
 }
+
+static void vulkan_external_capture_normalized_viewport(
+      const vk_t *vk,
+      const struct vk_external_capture *capture,
+      float *x,
+      float *y,
+      float *width,
+      float *height)
+{
+   float left;
+   float top;
+   float right;
+   float bottom;
+
+   if (!x || !y || !width || !height)
+      return;
+
+   *x      = 0.0f;
+   *y      = 0.0f;
+   *width  = 1.0f;
+   *height = 1.0f;
+   if (!vk || !capture || !capture->width || !capture->height)
+      return;
+
+   left   = MAX((float)vk->vp.x, 0.0f);
+   top    = MAX((float)vk->vp.y, 0.0f);
+   right  = MIN(
+         (float)vk->vp.x + (float)vk->vp.width,
+         (float)capture->width);
+   bottom = MIN(
+         (float)vk->vp.y + (float)vk->vp.height,
+         (float)capture->height);
+   if (right <= left || bottom <= top)
+      return;
+
+   *x      = left / (float)capture->width;
+   *y      = top / (float)capture->height;
+   *width  = (right - left) / (float)capture->width;
+   *height = (bottom - top) / (float)capture->height;
+}
 #endif
 
 static bool vulkan_frame(void *data, const void *frame,
@@ -5710,6 +5750,17 @@ static bool vulkan_frame(void *data, const void *frame,
       struct vk_external_capture *capture = external_capture;
       void *metal_texture       = NULL;
       void *metal_command_queue = NULL;
+      float video_viewport_x;
+      float video_viewport_y;
+      float video_viewport_width;
+      float video_viewport_height;
+      vulkan_external_capture_normalized_viewport(
+            vk,
+            capture,
+            &video_viewport_x,
+            &video_viewport_y,
+            &video_viewport_width,
+            &video_viewport_height);
       if (joyemu_vulkan_get_metal_objects(
                capture->image,
                vk->context->queue,
@@ -5717,7 +5768,11 @@ static bool vulkan_frame(void *data, const void *frame,
                &metal_command_queue))
          joyemu_external_display_submit_vulkan_frame(
                metal_texture,
-               metal_command_queue);
+               metal_command_queue,
+               video_viewport_x,
+               video_viewport_y,
+               video_viewport_width,
+               video_viewport_height);
    }
 #endif
 

@@ -39,7 +39,11 @@ void joyemu_external_display_submit_software_frame(
       bool rgb32);
 void joyemu_external_display_submit_vulkan_frame(
       const void *metal_texture,
-      const void *metal_command_queue);
+      const void *metal_command_queue,
+      float video_viewport_x,
+      float video_viewport_y,
+      float video_viewport_width,
+      float video_viewport_height);
 void joyemu_external_display_observe_vulkan_frame_source(void);
 bool joyemu_external_display_wants_vulkan_frames(void);
 #endif
