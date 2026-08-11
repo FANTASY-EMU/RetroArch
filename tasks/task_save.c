@@ -1544,9 +1544,19 @@ bool content_ram_state_pending(void)
    return ram_buf.to_write_file;
 }
 
+bool joyemu_state_save_wait_matches_task(
+      bool is_save_handler,
+      bool is_composite_save_load_handler)
+{
+   return is_save_handler || is_composite_save_load_handler;
+}
+
 static bool task_save_state_finder(retro_task_t *task, void *user_data)
 {
-   return (task && task->handler == task_save_handler);
+   return task && joyemu_state_save_wait_matches_task(
+         task->handler == task_save_handler,
+         task->handler == task_load_handler
+            && task->callback == content_load_and_save_state_cb);
 }
 
 bool joyemu_state_task_should_remain_in_progress(
@@ -1654,15 +1664,21 @@ bool content_load_state(const char *path,
       task->flags               &= ~RETRO_TASK_FLG_MUTE;
 
    g_joyemu_last_load_state_result = -1;
-   task_queue_push(task);
+   if (!task_queue_push(task))
+      goto error;
 
    return true;
 
 error:
+   g_joyemu_last_load_state_result = 0;
    if (state)
       free(state);
    if (task)
+   {
+      if (task->title)
+         task_free_title(task);
       free(task);
+   }
 
    return false;
 }
