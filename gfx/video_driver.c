@@ -63,6 +63,7 @@
 #include "../file_path_special.h"
 #include "../list_special.h"
 #include "../retroarch.h"
+#include "../runloop_speed_test_debug.h"
 #include "../verbosity.h"
 
 #define TIME_TO_FPS(last_time, new_time, frames) ((1000000.0f * (frames)) / ((new_time) - (last_time)))
@@ -3747,6 +3748,11 @@ void video_driver_frame(const void *data, unsigned width,
    static retro_time_t fps_time;
    static float last_fps, frame_time;
    static int32_t frame_time_accumulator;
+#if DEBUG
+   static uint64_t joyemu_ff_received_frames;
+   static uint64_t joyemu_ff_rendered_frames;
+   static retro_time_t joyemu_ff_window_started_at;
+#endif
    /* Mark the start of nonblock state for
     * ignoring initial previous frame time */
    static int8_t nonblock_active;
@@ -3882,6 +3888,41 @@ void video_driver_frame(const void *data, unsigned width,
       nonblock_active        = 0;
       frame_time_accumulator = 0;
    }
+
+#if DEBUG
+   if (     (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION)
+         && joyemu_runloop_fastforward_trace_enabled())
+   {
+      joyemu_ff_received_frames++;
+      if (render_frame)
+         joyemu_ff_rendered_frames++;
+
+      if (!joyemu_ff_window_started_at)
+         joyemu_ff_window_started_at = new_time;
+      else if ((new_time - joyemu_ff_window_started_at) >= 500000)
+      {
+         JOYEMU_FFTRACE_LOG(
+               "[JoyEMU FFTrace] pipeline stage=video_driver "
+               "received=%llu rendered=%llu dropped=%llu windowUs=%lld "
+               "frameskip=%d\n",
+               (unsigned long long)joyemu_ff_received_frames,
+               (unsigned long long)joyemu_ff_rendered_frames,
+               (unsigned long long)(joyemu_ff_received_frames
+                     - joyemu_ff_rendered_frames),
+               (long long)(new_time - joyemu_ff_window_started_at),
+               video_info.fastforward_frameskip ? 1 : 0);
+         joyemu_ff_received_frames   = 0;
+         joyemu_ff_rendered_frames   = 0;
+         joyemu_ff_window_started_at = new_time;
+      }
+   }
+   else
+   {
+      joyemu_ff_received_frames   = 0;
+      joyemu_ff_rendered_frames   = 0;
+      joyemu_ff_window_started_at = 0;
+   }
+#endif
 
    last_time        = new_time;
    last_frame_duped = !data;
