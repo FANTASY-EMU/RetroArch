@@ -32,6 +32,7 @@
 #endif
 
 #include "vulkan_common.h"
+#include "joyemu_vulkan_feature_policy.h"
 #include "../include/vulkan/vulkan.h"
 #include "vksym.h"
 #include <libretro_vulkan.h>
@@ -57,6 +58,85 @@ static dylib_t                       vulkan_library;
 static VkInstance                    cached_instance_vk;
 static VkDevice                      cached_device_vk;
 static retro_vulkan_destroy_device_t cached_destroy_device_vk;
+
+#if defined(__APPLE__)
+static bool joyemu_vulkan_mask_ppsspp_cull_distance;
+static PFN_vkGetInstanceProcAddr joyemu_vulkan_real_get_instance_proc_addr;
+static PFN_vkGetInstanceProcAddr joyemu_vulkan_core_get_instance_proc_addr;
+static PFN_vkGetPhysicalDeviceFeatures joyemu_vulkan_real_get_physical_device_features;
+static PFN_vkGetPhysicalDeviceFeatures2 joyemu_vulkan_real_get_physical_device_features2;
+static PFN_vkGetPhysicalDeviceFeatures2KHR joyemu_vulkan_real_get_physical_device_features2_khr;
+
+static void VKAPI_CALL joyemu_vulkan_get_physical_device_features(
+      VkPhysicalDevice physical_device, VkPhysicalDeviceFeatures *features)
+{
+   joyemu_vulkan_real_get_physical_device_features(physical_device, features);
+   features->shaderCullDistance = VK_FALSE;
+}
+
+static void VKAPI_CALL joyemu_vulkan_get_physical_device_features2(
+      VkPhysicalDevice physical_device, VkPhysicalDeviceFeatures2 *features)
+{
+   joyemu_vulkan_real_get_physical_device_features2(physical_device, features);
+   features->features.shaderCullDistance = VK_FALSE;
+}
+
+static void VKAPI_CALL joyemu_vulkan_get_physical_device_features2_khr(
+      VkPhysicalDevice physical_device, VkPhysicalDeviceFeatures2KHR *features)
+{
+   joyemu_vulkan_real_get_physical_device_features2_khr(physical_device, features);
+   features->features.shaderCullDistance = VK_FALSE;
+}
+
+static PFN_vkVoidFunction VKAPI_CALL joyemu_vulkan_negotiation_get_instance_proc_addr(
+      VkInstance instance, const char *name)
+{
+   PFN_vkVoidFunction proc =
+      joyemu_vulkan_real_get_instance_proc_addr(instance, name);
+
+   if (!joyemu_vulkan_mask_ppsspp_cull_distance || !proc)
+      return proc;
+
+   if (strcmp(name, "vkGetPhysicalDeviceFeatures") == 0)
+   {
+      joyemu_vulkan_real_get_physical_device_features =
+         (PFN_vkGetPhysicalDeviceFeatures)proc;
+      return (PFN_vkVoidFunction)joyemu_vulkan_get_physical_device_features;
+   }
+   if (strcmp(name, "vkGetPhysicalDeviceFeatures2") == 0)
+   {
+      joyemu_vulkan_real_get_physical_device_features2 =
+         (PFN_vkGetPhysicalDeviceFeatures2)proc;
+      return (PFN_vkVoidFunction)joyemu_vulkan_get_physical_device_features2;
+   }
+   if (strcmp(name, "vkGetPhysicalDeviceFeatures2KHR") == 0)
+   {
+      joyemu_vulkan_real_get_physical_device_features2_khr =
+         (PFN_vkGetPhysicalDeviceFeatures2KHR)proc;
+      return (PFN_vkVoidFunction)joyemu_vulkan_get_physical_device_features2_khr;
+   }
+   return proc;
+}
+
+static PFN_vkGetInstanceProcAddr joyemu_vulkan_prepare_negotiation_instance_proc_addr(
+      const char *application_name)
+{
+   joyemu_vulkan_real_get_instance_proc_addr =
+      vulkan_symbol_wrapper_instance_proc_addr();
+   joyemu_vulkan_mask_ppsspp_cull_distance =
+      joyemu_vulkan_should_mask_cull_distance(application_name, true);
+   joyemu_vulkan_core_get_instance_proc_addr =
+      joyemu_vulkan_mask_ppsspp_cull_distance
+      ? joyemu_vulkan_negotiation_get_instance_proc_addr
+      : joyemu_vulkan_real_get_instance_proc_addr;
+
+   if (!joyemu_vulkan_mask_ppsspp_cull_distance)
+      return joyemu_vulkan_core_get_instance_proc_addr;
+
+   RARCH_LOG("[Vulkan] JoyEMU masking shaderCullDistance during PPSSPP device negotiation.\n");
+   return joyemu_vulkan_core_get_instance_proc_addr;
+}
+#endif
 
 #if 0
 #define WSI_HARDENING_TEST
@@ -632,8 +712,15 @@ static bool vulkan_context_init_device(gfx_ctx_vulkan_data_t *vk)
    if (!cached_device_vk && iface && iface->create_device)
    {
       struct retro_vulkan_context context = { 0 };
+      PFN_vkGetInstanceProcAddr get_instance_proc_addr =
+         vulkan_symbol_wrapper_instance_proc_addr();
 
       bool ret = false;
+
+#if defined(__APPLE__)
+      if (joyemu_vulkan_core_get_instance_proc_addr)
+         get_instance_proc_addr = joyemu_vulkan_core_get_instance_proc_addr;
+#endif
 
       if (     (iface->interface_version >= 2)
             &&  iface->create_device2)
@@ -641,7 +728,7 @@ static bool vulkan_context_init_device(gfx_ctx_vulkan_data_t *vk)
          ret = iface->create_device2(&context, vk->context.instance,
                vk->context.gpu,
                vk->vk_surface,
-               vulkan_symbol_wrapper_instance_proc_addr(),
+               get_instance_proc_addr,
                vulkan_context_create_device_wrapper, vk);
 
          if (!ret)
@@ -651,7 +738,7 @@ static bool vulkan_context_init_device(gfx_ctx_vulkan_data_t *vk)
             ret = iface->create_device2(&context, vk->context.instance,
                   vk->context.gpu,
                   vk->vk_surface,
-                  vulkan_symbol_wrapper_instance_proc_addr(),
+                  get_instance_proc_addr,
                   vulkan_context_create_device_wrapper, vk);
          }
       }
@@ -660,7 +747,7 @@ static bool vulkan_context_init_device(gfx_ctx_vulkan_data_t *vk)
          ret = iface->create_device(&context, vk->context.instance,
                vk->context.gpu,
                vk->vk_surface,
-               vulkan_symbol_wrapper_instance_proc_addr(),
+               get_instance_proc_addr,
                vulkan_device_extensions,
                ARRAY_SIZE(vulkan_device_extensions),
                NULL,
@@ -2508,6 +2595,12 @@ bool vulkan_context_init(gfx_ctx_vulkan_data_t *vk,
          }
       }
    }
+
+#if defined(__APPLE__)
+   GetInstanceProcAddr =
+      joyemu_vulkan_prepare_negotiation_instance_proc_addr(
+            app.pApplicationName);
+#endif
 
    if (app.apiVersion < VK_API_VERSION_1_1)
    {
