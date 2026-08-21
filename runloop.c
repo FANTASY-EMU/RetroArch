@@ -87,6 +87,15 @@
 #include <queues/message_queue.h>
 #include <lists/dir_list.h>
 
+#if defined(__APPLE__)
+extern void joyemu_psp_vm_guard_prepare_for_core_content_init(
+      const char *core_path) __attribute__((weak_import));
+extern void joyemu_psp_vm_guard_rearm_after_core_shutdown(
+      const char *core_path) __attribute__((weak_import));
+extern void joyemu_psp_vm_guard_trace_handoff(
+      const char *stage, const char *core_path) __attribute__((weak_import));
+#endif
+
 #ifdef EMSCRIPTEN
 #include <emscripten/emscripten.h>
 #endif
@@ -4183,6 +4192,13 @@ static bool core_unload_game(void)
    {
       RARCH_LOG("[Core] Unloading game...\n");
       runloop_st->current_core.retro_unload_game();
+#if defined(__APPLE__)
+      /* PPSSPP releases its fixed memory views in retro_unload_game().
+       * Reacquire the guard before video/core teardown can reuse them. */
+      if (joyemu_psp_vm_guard_rearm_after_core_shutdown)
+         joyemu_psp_vm_guard_rearm_after_core_shutdown(
+               path_get(RARCH_PATH_CORE));
+#endif
       runloop_st->core_poll_type_override  = POLL_TYPE_OVERRIDE_DONTCARE;
       runloop_st->current_core.flags      &= ~RETRO_CORE_FLAG_GAME_LOADED;
    }
@@ -4296,6 +4312,14 @@ void runloop_event_deinit_core(void)
    {
       RARCH_LOG("[Core] Unloading core...\n");
       runloop_st->current_core.retro_deinit();
+#if defined(__APPLE__)
+      /* PPSSPP has now released its fixed Darwin memory views. Reserve the
+       * same class of address layout before framework/video teardown can
+       * consume it. This also covers in-session full content reloads. */
+      if (joyemu_psp_vm_guard_rearm_after_core_shutdown)
+         joyemu_psp_vm_guard_rearm_after_core_shutdown(
+               path_get(RARCH_PATH_CORE));
+#endif
    }
 
    /* retro_deinit() may call
@@ -5050,6 +5074,12 @@ bool runloop_event_init_core(
 
    runloop_st->current_core.retro_init();
    runloop_st->current_core.flags         |= RETRO_CORE_FLAG_INITED;
+
+#if defined(__APPLE__)
+   if (joyemu_psp_vm_guard_trace_handoff)
+      joyemu_psp_vm_guard_trace_handoff(
+            "after_retro_init", path_get(RARCH_PATH_CORE));
+#endif
 
    /* Attempt to set initial disk index */
    if (initial_disk_change_enable)
@@ -8231,6 +8261,18 @@ bool core_load_game(retro_ctx_load_content_info_t *load_info)
 
    set_save_state_in_background(false);
 
+#if defined(__APPLE__)
+   if (joyemu_psp_vm_guard_trace_handoff)
+      joyemu_psp_vm_guard_trace_handoff(
+            "before_retro_load_game", path_get(RARCH_PATH_CORE));
+   /* Do not release the protected candidate here: PPSSPP initializes its
+    * memory asynchronously. Mark the handoff pending so its fixed vm_remap
+    * can atomically overwrite only the JoyEngine-owned guard pages. */
+   if (joyemu_psp_vm_guard_prepare_for_core_content_init)
+      joyemu_psp_vm_guard_prepare_for_core_content_init(
+            path_get(RARCH_PATH_CORE));
+#endif
+
    if (load_info && load_info->special)
       game_loaded = runloop_st->current_core.retro_load_game_special(
             load_info->special->id, load_info->info, load_info->content->size);
@@ -8238,6 +8280,12 @@ bool core_load_game(retro_ctx_load_content_info_t *load_info)
       game_loaded = runloop_st->current_core.retro_load_game(load_info->info);
    else if (content_get_flags() & CONTENT_ST_FLAG_CORE_DOES_NOT_NEED_CONTENT)
       game_loaded = runloop_st->current_core.retro_load_game(NULL);
+
+#if defined(__APPLE__)
+   if (joyemu_psp_vm_guard_trace_handoff)
+      joyemu_psp_vm_guard_trace_handoff(
+            "after_retro_load_game", path_get(RARCH_PATH_CORE));
+#endif
 
    if (game_loaded)
    {
