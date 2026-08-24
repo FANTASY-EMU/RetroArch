@@ -881,6 +881,7 @@ typedef struct
    uint8_t frame_delay_target;
    uint8_t frame_delay_effective;
    bool frame_delay_pause;
+   bool fastforward_frameskip_active;
 
    bool threaded;
 } video_driver_state_t;

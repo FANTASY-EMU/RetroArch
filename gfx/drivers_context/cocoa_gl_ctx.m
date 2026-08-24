@@ -41,8 +41,13 @@
 #include "../../ui/drivers/cocoa/apple_platform.h"
 #include "../../configuration.h"
 #include "../../retroarch.h"
+#include "../../runloop_speed_test_debug.h"
 #include "../../verbosity.h"
 #include "../../joyemu_cadence_trace_compat.h"
+#include "../../joyemu_fastforward_policy.h"
+#if DEBUG
+#include "../../joyemu_fastforward_pipeline_debug.h"
+#endif
 #ifdef HAVE_METAL
 #include "../common/metal_common.h"
 #endif
@@ -80,6 +85,19 @@ static unsigned g_gl_minor          = 0;
 static unsigned g_gl_major          = 0;
 #if defined(HAVE_COCOATOUCH)
 static GLKView *glk_view            = NULL;
+#endif
+
+#ifndef OSX
+static int cocoa_gl_fast_forward_skip_count(cocoa_ctx_data_t *cocoa_ctx)
+{
+   video_driver_state_t *video_st = video_state_get_ptr();
+   bool frontend_frameskip_active = video_st
+      && video_st->fastforward_frameskip_active;
+
+   return joyemu_cocoa_gl_fast_forward_skip_count(
+         (cocoa_ctx->flags & COCOA_CTX_FLAG_IS_SYNCING) != 0,
+         frontend_frameskip_active);
+}
 #endif
 
 /* Forward declaration */
@@ -313,12 +331,13 @@ static void cocoa_gl_gfx_ctx_swap_interval(void *data, int i)
 #else
    cocoa_ctx_data_t *cocoa_ctx   = (cocoa_ctx_data_t*)data;
    /* < No way to disable Vsync on iOS? */
-   /*   Just skip presents so fast forward still works. */
+   /*   Frontend frameskip already owns cadence while active.
+    *   Retain the fixed Cocoa fallback only when it is disabled. */
    if (interval)
       cocoa_ctx->flags          |=  COCOA_CTX_FLAG_IS_SYNCING;
    else
       cocoa_ctx->flags          &= ~COCOA_CTX_FLAG_IS_SYNCING;
-   cocoa_ctx->fast_forward_skips = interval ? 0 : 3;
+   cocoa_ctx->fast_forward_skips = cocoa_gl_fast_forward_skip_count(cocoa_ctx);
 #endif
 }
 
@@ -332,17 +351,51 @@ static void cocoa_gl_gfx_ctx_swap_buffers(void *data)
    joyemu_cadence_trace_end(JOYEMU_CADENCE_TRACE_GL_SWAP, swap_trace);
 #else
    cocoa_ctx_data_t *cocoa_ctx = (cocoa_ctx_data_t*)data;
-   if (!(--cocoa_ctx->fast_forward_skips < 0))
-      return;
-   if (glk_view)
+#if DEBUG
+   static joyemu_fastforward_pipeline_window_t joyemu_ff_cocoa_gl_window;
+   bool did_present = false;
+#endif
+   int configured_skip_count = cocoa_gl_fast_forward_skip_count(cocoa_ctx);
+   bool should_present = joyemu_cocoa_gl_fast_forward_should_present(
+         &cocoa_ctx->fast_forward_skips, configured_skip_count);
+
+   if (should_present && glk_view)
    {
       joyemu_cadence_trace_token_t swap_trace =
          joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_GL_SWAP);
       [glk_view display];
       joyemu_cadence_trace_end(JOYEMU_CADENCE_TRACE_GL_SWAP, swap_trace);
+#if DEBUG
+      did_present = true;
+#endif
    }
-   cocoa_ctx->fast_forward_skips =
-      (cocoa_ctx->flags & COCOA_CTX_FLAG_IS_SYNCING) ? 0 : 3;
+#if DEBUG
+   if (     (runloop_get_flags() & RUNLOOP_FLAG_FASTMOTION)
+         && joyemu_runloop_fastforward_trace_enabled())
+   {
+      joyemu_fastforward_pipeline_snapshot_t snapshot;
+      if (joyemu_fastforward_pipeline_note(
+               &joyemu_ff_cocoa_gl_window,
+               did_present,
+               cpu_features_get_time_usec(),
+               500000,
+               &snapshot))
+      {
+         JOYEMU_FFTRACE_LOG(
+               "[JoyEMU FFTrace] pipeline stage=cocoa_gl "
+               "requested=%llu presented=%llu skipped=%llu windowUs=%lld "
+               "syncing=%d remainingSkip=%d\n",
+               (unsigned long long)snapshot.requested,
+               (unsigned long long)snapshot.completed,
+               (unsigned long long)snapshot.dropped,
+               (long long)snapshot.elapsed_us,
+               (cocoa_ctx->flags & COCOA_CTX_FLAG_IS_SYNCING) ? 1 : 0,
+               cocoa_ctx->fast_forward_skips);
+      }
+   }
+   else
+      joyemu_fastforward_pipeline_reset(&joyemu_ff_cocoa_gl_window);
+#endif
 #endif
 }
 

@@ -63,7 +63,12 @@
 #include "../file_path_special.h"
 #include "../list_special.h"
 #include "../retroarch.h"
+#include "../runloop_speed_test_debug.h"
 #include "../verbosity.h"
+#include "../joyemu_fastforward_policy.h"
+#if DEBUG
+#include "../joyemu_fastforward_pipeline_debug.h"
+#endif
 
 #define TIME_TO_FPS(last_time, new_time, frames) ((1000000.0f * (frames)) / ((new_time) - (last_time)))
 
@@ -3747,6 +3752,9 @@ void video_driver_frame(const void *data, unsigned width,
    static retro_time_t fps_time;
    static float last_fps, frame_time;
    static int32_t frame_time_accumulator;
+#if DEBUG
+   static joyemu_fastforward_pipeline_window_t joyemu_ff_video_window;
+#endif
    /* Mark the start of nonblock state for
     * ignoring initial previous frame time */
    static int8_t nonblock_active;
@@ -3810,6 +3818,12 @@ void video_driver_frame(const void *data, unsigned width,
    menu_is_alive = (video_info.menu_st_flags & MENU_ST_FLAG_ALIVE) ? true : false;
 #endif
 
+   video_st->fastforward_frameskip_active =
+      joyemu_frontend_fastforward_frameskip_is_active(
+            video_info.input_driver_nonblock_state,
+            video_info.fastforward_frameskip,
+            menu_is_alive);
+
    /* Take target refresh rate as initial FPS value instead of 0.00 */
    if (!last_fps)
       last_fps = video_info.refresh_rate;
@@ -3824,11 +3838,8 @@ void video_driver_frame(const void *data, unsigned width,
     *   current frame is not (i.e. if core was
     *   previously sending duped frames, ensure
     *   that the next frame update is captured) */
-   if (     video_info.input_driver_nonblock_state
-         && video_info.fastforward_frameskip
-         && !( menu_is_alive
-            || (last_frame_duped && !!data))
-      )
+   if (     video_st->fastforward_frameskip_active
+         && !(last_frame_duped && !!data))
    {
       int32_t frame_time_accumulator_prev  = frame_time_accumulator;
       uint16_t frame_time_delta            = new_time - last_time;
@@ -3882,6 +3893,35 @@ void video_driver_frame(const void *data, unsigned width,
       nonblock_active        = 0;
       frame_time_accumulator = 0;
    }
+
+#if DEBUG
+   if (     (runloop_st->flags & RUNLOOP_FLAG_FASTMOTION)
+         && joyemu_runloop_fastforward_trace_enabled())
+   {
+      joyemu_fastforward_pipeline_snapshot_t snapshot;
+      if (joyemu_fastforward_pipeline_note(
+               &joyemu_ff_video_window,
+               render_frame,
+               new_time,
+               500000,
+               &snapshot))
+      {
+         JOYEMU_FFTRACE_LOG(
+               "[JoyEMU FFTrace] pipeline stage=video_driver "
+               "received=%llu rendered=%llu dropped=%llu windowUs=%lld "
+               "frameskipConfigured=%d frameskipActive=%d menu=%d\n",
+               (unsigned long long)snapshot.requested,
+               (unsigned long long)snapshot.completed,
+               (unsigned long long)snapshot.dropped,
+               (long long)snapshot.elapsed_us,
+               video_info.fastforward_frameskip ? 1 : 0,
+               video_st->fastforward_frameskip_active ? 1 : 0,
+               menu_is_alive ? 1 : 0);
+      }
+   }
+   else
+      joyemu_fastforward_pipeline_reset(&joyemu_ff_video_window);
+#endif
 
    last_time        = new_time;
    last_frame_duped = !data;
