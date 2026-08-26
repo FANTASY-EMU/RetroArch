@@ -73,6 +73,22 @@ static inline void joyemu_cadence_trace_record_vulkan_readback_missing_image(
 {
 }
 
+static inline void joyemu_audio_benchmark_note_underflow(
+      uint64_t concealed_frames)
+{
+   (void)concealed_frames;
+}
+
+static inline void joyemu_audio_benchmark_snapshot_and_reset(
+      uint64_t *underflow_count,
+      uint64_t *concealed_frame_count)
+{
+   if (underflow_count)
+      *underflow_count = 0;
+   if (concealed_frame_count)
+      *concealed_frame_count = 0;
+}
+
 #endif
 
 #endif

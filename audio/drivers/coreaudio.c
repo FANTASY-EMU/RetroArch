@@ -102,6 +102,7 @@ static OSStatus coreaudio_audio_write_cb(void *userdata,
 
    if (FIFO_READ_AVAIL(dev->buffer) < write_avail)
    {
+      joyemu_audio_benchmark_note_underflow(number_frames);
       *action_flags = kAudioUnitRenderAction_OutputIsSilence;
       /* Seems to be needed. */
       memset(outbuf, 0, write_avail);
