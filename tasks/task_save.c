@@ -86,11 +86,6 @@ void joyemu_content_reset_load_state_result(void)
    g_joyemu_last_load_state_result = -1;
 }
 
-/* Set by JERuntime.m before each load on the hybrid MAME core. Enables the
- * RASTATE MEM block legacy-prefix-strip in content_load_rastate1. Other
- * cores (and other systems) keep this at 0 so the load path is untouched. */
-extern int g_joyemu_arcade_legacy_compat;
-
 /* EXT MAGIC header bytes written by ext_bridge_serialize on every modern
  * arcade savestate. Used to distinguish modern saves from legacy FBNeo
  * saves that carry a 4-byte LibretroAreaScan prefix instead. */
@@ -140,6 +135,7 @@ typedef struct
    ssize_t bytes_read;
    int state_slot;
    uint8_t flags;
+   bool strip_arcade_legacy_prefix;
    char path[PATH_MAX_LENGTH];
 } save_task_state_t;
 
@@ -850,7 +846,7 @@ end:
    task_load_handler_finished(task, state);
 }
 
-static bool content_load_rastate1(unsigned char* input, size_t len)
+static bool content_load_rastate1(unsigned char* input, size_t len, bool strip_arcade_legacy_prefix)
 {
    unsigned char *stop = input + len;
    bool seen_core      = false;
@@ -883,9 +879,9 @@ static bool content_load_rastate1(unsigned char* input, size_t len)
           * same total size, so ext_bridge_unserialize fails to detect the
           * legacy layout, reads from the wrong offset, and silently
           * corrupts every memory area while still returning success. The
-          * ObjC frontend gates this fix to the MAME core only - it is the
-          * only reliable signal because ext_bridge_* symbols are hidden. */
-         if (g_joyemu_arcade_legacy_compat
+          * The frontend attaches this compatibility policy to one load task;
+          * ordinary and subsequent loads therefore cannot inherit it. */
+         if (strip_arcade_legacy_prefix
              && block_size == core_serialize_size()
              && block_size >= sizeof(JOYEMU_ARCADE_EXT_MAGIC)
              && memcmp(input, JOYEMU_ARCADE_EXT_MAGIC,
@@ -978,7 +974,8 @@ static bool content_load_rastate1(unsigned char* input, size_t len)
    return true;
 }
 
-bool content_deserialize_state(const void *s, size_t len)
+static bool content_deserialize_state_with_options(
+      const void *s, size_t len, bool strip_arcade_legacy_prefix)
 {
    if (memcmp(s, "RASTATE", 7) != 0)
    {
@@ -1009,7 +1006,7 @@ bool content_deserialize_state(const void *s, size_t len)
       switch (input[7]) /* version */
       {
          case 1:
-            if (content_load_rastate1(input, len))
+            if (content_load_rastate1(input, len, strip_arcade_legacy_prefix))
                break;
             /* fall-through intentional */
          default:
@@ -1017,6 +1014,11 @@ bool content_deserialize_state(const void *s, size_t len)
       }
    }
    return true;
+}
+
+bool content_deserialize_state(const void *s, size_t len)
+{
+   return content_deserialize_state_with_options(s, len, false);
 }
 
 /**
@@ -1127,7 +1129,8 @@ static void content_load_state_cb(retro_task_t *task,
    /* Backup the current state so we can undo this load */
    content_save_state("RAM", false);
 
-   ret = content_deserialize_state(buf, _len);
+   ret = content_deserialize_state_with_options(
+         buf, _len, load_data->strip_arcade_legacy_prefix);
 
    /* Flush back. */
    for (i = 0; i < num_blocks; i++)
@@ -1606,8 +1609,9 @@ void content_wait_for_load_state_task(void)
  *
  * @return true if successful, false otherwise.
  **/
-bool content_load_state(const char *path,
-      bool load_to_backup_buffer, bool autoload)
+static bool content_load_state_internal(const char *path,
+      bool load_to_backup_buffer, bool autoload,
+      bool strip_arcade_legacy_prefix)
 {
    retro_task_t       *task        = NULL;
    save_task_state_t *state        = NULL;
@@ -1632,6 +1636,7 @@ bool content_load_state(const char *path,
       state->flags             |= SAVE_TASK_FLAG_LOAD_TO_BACKUP_BUFF;
    if (autoload)
       state->flags             |= SAVE_TASK_FLAG_AUTOLOAD;
+   state->strip_arcade_legacy_prefix = strip_arcade_legacy_prefix;
    state->state_slot            = settings->ints.state_slot;
    if (video_st->frame_cache_data && (video_st->frame_cache_data == RETRO_HW_FRAME_BUFFER_VALID))
       state->flags             |= SAVE_TASK_FLAG_HAS_VALID_FB;
@@ -1665,6 +1670,22 @@ error:
       free(task);
 
    return false;
+}
+
+bool content_load_state(const char *path,
+      bool load_to_backup_buffer, bool autoload)
+{
+   return content_load_state_internal(
+         path, load_to_backup_buffer, autoload, false);
+}
+
+bool content_load_state_with_options(const char *path,
+      bool load_to_backup_buffer, bool autoload,
+      const content_load_state_options_t *options)
+{
+   return content_load_state_internal(
+         path, load_to_backup_buffer, autoload,
+         options && options->strip_arcade_legacy_prefix);
 }
 
 bool content_rename_state(const char *origin, const char *dest)

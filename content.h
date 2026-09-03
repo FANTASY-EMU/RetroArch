@@ -39,6 +39,11 @@ typedef struct content_ctx_info
    int argc;                       /* Argument count. */
 } content_ctx_info_t;
 
+typedef struct content_load_state_options
+{
+   bool strip_arcade_legacy_prefix;
+} content_load_state_options_t;
+
 /* Load a state from memory. */
 bool content_load_state_from_ram(void);
 
@@ -50,6 +55,11 @@ bool content_ram_state_to_file(const char *path);
 
 /* Load a state from disk to memory. */
 bool content_load_state(const char* path, bool load_to_backup_buffer, bool autoload);
+
+/* Load a state from disk with request-scoped compatibility options. */
+bool content_load_state_with_options(const char *path,
+      bool load_to_backup_buffer, bool autoload,
+      const content_load_state_options_t *options);
 
 /* Save a state from memory to disk. */
 bool content_save_state(const char *path, bool save_to_disk);
