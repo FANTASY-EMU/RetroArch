@@ -14,6 +14,9 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 #include <stdlib.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <features/features_cpu.h>
 
 #if TARGET_OS_IPHONE
 #include <AudioToolbox/AudioToolbox.h>
@@ -35,7 +38,14 @@
 
 #include "../audio_driver.h"
 #include "../../verbosity.h"
+#include "../../runloop.h"
 #include "../../joyemu_cadence_trace_compat.h"
+
+typedef struct coreaudio_observation
+{
+   uint64_t callbacks, requested, zeroed, held;
+   uint64_t offered, accepted, writes, short_writes, write_us, max_write_gap_us;
+} coreaudio_observation_t;
 
 typedef struct coreaudio
 {
@@ -51,7 +61,46 @@ typedef struct coreaudio
    bool dev_alive;
    bool is_paused;
    bool nonblock;
+   bool observe_audio;
+   double observed_rate;
+   retro_time_t observation_start, previous_write;
+   coreaudio_observation_t observation; /* Protected by the existing FIFO lock. */
 } coreaudio_t;
+
+static bool coreaudio_should_observe(const char *core, const char *setting)
+{
+   return string_is_equal(core, "Azahar") && string_is_equal(setting, "1");
+}
+
+/* Called only from the producer/teardown thread. Never log from RemoteIO. */
+static void coreaudio_report_observation(coreaudio_t *dev, bool force)
+{
+   coreaudio_observation_t value;
+   retro_time_t now, elapsed;
+   size_t queued;
+   if (!dev->observe_audio || !dev->lock)
+      return;
+   now = cpu_features_get_time_usec();
+   elapsed = now - dev->observation_start;
+   if (!force && elapsed < 1000000)
+      return;
+   slock_lock(dev->lock);
+   value = dev->observation;
+   memset(&dev->observation, 0, sizeof(dev->observation));
+   queued = dev->buffer ? FIFO_READ_AVAIL(dev->buffer) : 0;
+   dev->observation_start = now;
+   slock_unlock(dev->lock);
+   fprintf(stderr, "AZAHAR-AUDIO window_us=%lld rate=%.0f frame_bytes=%zu capacity=%zu "
+         "callbacks=%llu requested=%llu zeroed=%llu held=%llu offered=%llu accepted=%llu "
+         "writes=%llu short_writes=%llu write_us=%llu max_write_gap_us=%llu queued=%zu final=%d\n",
+         (long long)elapsed, dev->observed_rate, 2 * sizeof(float), dev->buffer_size,
+         (unsigned long long)value.callbacks, (unsigned long long)value.requested,
+         (unsigned long long)value.zeroed, (unsigned long long)value.held,
+         (unsigned long long)value.offered, (unsigned long long)value.accepted,
+         (unsigned long long)value.writes, (unsigned long long)value.short_writes,
+         (unsigned long long)value.write_us, (unsigned long long)value.max_write_gap_us,
+         queued, force);
+}
 
 static void coreaudio_free(void *data)
 {
@@ -71,7 +120,10 @@ static void coreaudio_free(void *data)
    }
 
    if (dev->buffer)
+   {
+      coreaudio_report_observation(dev, true);
       fifo_free(dev->buffer);
+   }
 
    slock_free(dev->lock);
    scond_free(dev->cond);
@@ -99,6 +151,18 @@ static OSStatus coreaudio_audio_write_cb(void *userdata,
    outbuf      = io_data->mBuffers[0].mData;
 
    slock_lock(dev->lock);
+
+   if (dev->observe_audio)
+   {
+      size_t available = FIFO_READ_AVAIL(dev->buffer);
+      dev->observation.callbacks++;
+      dev->observation.requested += write_avail;
+      if (available < write_avail)
+      {
+         dev->observation.zeroed += write_avail;
+         dev->observation.held += available;
+      }
+   }
 
    if (FIFO_READ_AVAIL(dev->buffer) < write_avail)
    {
@@ -197,6 +261,9 @@ static void *coreaudio_init(const char *device,
 
    dev->lock = slock_new();
    dev->cond = scond_new();
+   dev->observe_audio = coreaudio_should_observe(
+         runloop_state_get_ptr()->system.info.library_name,
+         getenv("JOY_AZAHAR_AUDIO_DIAGNOSTICS"));
 
    /* Create AudioComponent */
    desc.componentType         = kAudioUnitType_Output;
@@ -266,6 +333,9 @@ static void *coreaudio_init(const char *device,
    RARCH_LOG("[CoreAudio] Using output sample rate of %.1f Hz.\n",
          (float)real_desc.mSampleRate);
    *new_rate = real_desc.mSampleRate;
+   dev->observed_rate = real_desc.mSampleRate;
+   if (dev->observe_audio)
+      dev->observation_start = cpu_features_get_time_usec();
 
    /* Set channel layout (fails on iOS). */
 #ifndef TARGET_OS_IPHONE
@@ -312,6 +382,8 @@ static ssize_t coreaudio_write(void *data, const void *buf_, size_t len)
    coreaudio_t *dev   = (coreaudio_t*)data;
    const uint8_t *buf = (const uint8_t*)buf_;
    size_t _len        = 0;
+   size_t offered     = len;
+   retro_time_t began = dev->observe_audio ? cpu_features_get_time_usec() : 0;
    joyemu_cadence_trace_token_t blocked_trace =
       joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_AUDIO_BLOCKED);
 
@@ -351,6 +423,22 @@ static ssize_t coreaudio_write(void *data, const void *buf_, size_t len)
    }
 
    joyemu_cadence_trace_end(JOYEMU_CADENCE_TRACE_AUDIO_BLOCKED, blocked_trace);
+   if (dev->observe_audio)
+   {
+      retro_time_t ended = cpu_features_get_time_usec();
+      uint64_t gap = dev->previous_write ? (uint64_t)(began - dev->previous_write) : 0;
+      slock_lock(dev->lock);
+      dev->observation.offered += offered;
+      dev->observation.accepted += _len;
+      dev->observation.writes++;
+      dev->observation.short_writes += _len < offered;
+      dev->observation.write_us += (uint64_t)(ended - began);
+      if (gap > dev->observation.max_write_gap_us)
+         dev->observation.max_write_gap_us = gap;
+      dev->previous_write = began;
+      slock_unlock(dev->lock);
+      coreaudio_report_observation(dev, false);
+   }
    return _len;
 }
 
