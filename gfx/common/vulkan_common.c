@@ -804,9 +804,14 @@ static bool vulkan_context_init_device(gfx_ctx_vulkan_data_t *vk)
 #endif
 #endif
 
-   /* If we're emulating mailbox, stick to using fences rather than semaphores.
-    * Avoids some really weird driver bugs. */
-   if (!(vk->flags & VK_DATA_FLAG_EMULATE_MAILBOX))
+   /* Keep the mailbox worker's fence protocol. On iOS, merely supporting
+    * mailbox must not force normal FIFO acquire to wait on the UI thread:
+    * a cached-frame screenshot presents and acquires again before returning
+    * to Core Animation. Waiting for that next image's fence can deadlock.
+    * Normal acquire uses the existing GPU semaphore path; active emulated
+    * mailbox still takes its separate fence-based branch below. */
+   if (!(vk->flags & VK_DATA_FLAG_EMULATE_MAILBOX) ||
+       vk->wsi_type == VULKAN_WSI_MVK_IOS)
    {
       if (vk->context.gpu_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)
       {
