@@ -1394,10 +1394,6 @@ bool content_auto_save_state(const char *path)
       return false;
    }
 
-   _len = core_serialize_size();
-   if (_len == 0)
-      return false;
-
    serial_data = content_get_serialized_data(&_len);
    if (!serial_data)
       return false;
@@ -1463,11 +1459,16 @@ bool content_save_state(const char *path, bool save_to_disk)
       return false;
    }
 
-   _len = core_serialize_size();
-   if (_len == 0)
-      return false;
-
-   if (!save_state_in_background)
+   /* Immediate serialization queries the size itself. Some variable-size cores
+    * produce the full snapshot in that query, so a separate probe duplicates it.
+    * Deferred disk tasks keep their preflight and serialize again when executed. */
+   if (save_state_in_background && save_to_disk)
+   {
+      _len = core_serialize_size();
+      if (_len == 0)
+         return false;
+   }
+   else
    {
       if (!(data = content_get_serialized_data(&_len)))
       {
@@ -1816,11 +1817,6 @@ bool content_save_state_to_ram(void)
             msg_hash_to_str(MSG_CORE_DOES_NOT_SUPPORT_SAVESTATES));
       return false;
    }
-
-   _len = core_serialize_size();
-
-   if (_len == 0)
-      return false;
 
    if (!save_state_in_background)
    {
