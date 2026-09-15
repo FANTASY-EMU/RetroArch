@@ -43,6 +43,9 @@
 #include "paths.h"
 #include "runloop.h"
 #include "verbosity.h"
+#if defined(__APPLE__) && defined(HAVE_DYNAMIC)
+extern bool joyemu_je_azahar_mod_requires_unique_session(void) __attribute__((weak_import));
+#endif
 
 static int16_t input_state_get_last(unsigned port,
       unsigned device, unsigned index, unsigned id)
@@ -529,6 +532,11 @@ error:
 #if defined(HAVE_DYNAMIC) || defined(HAVE_DYLIB)
 bool secondary_core_ensure_exists(void *data, settings_t *settings)
 {
+#if defined(__APPLE__) && defined(HAVE_DYNAMIC)
+   if (joyemu_je_azahar_mod_requires_unique_session &&
+         joyemu_je_azahar_mod_requires_unique_session())
+      return false;
+#endif
    runloop_state_t *runloop_st         = (runloop_state_t*)data;
    const char *path_directory_libretro = settings->paths.directory_libretro;
    unsigned input_max_users            = settings->uints.input_max_users;

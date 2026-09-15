@@ -88,6 +88,10 @@
 #include <lists/dir_list.h>
 
 #if defined(__APPLE__)
+extern bool joyemu_je_azahar_mod_before_load(void*,const char*,const char*,bool) __attribute__((weak_import));
+extern void joyemu_je_azahar_mod_after_drain(void*) __attribute__((weak_import));
+extern void joyemu_je_azahar_mod_before_close(void*) __attribute__((weak_import));
+extern bool joyemu_je_azahar_mod_requires_unique_session(void) __attribute__((weak_import));
 extern void joyemu_psp_vm_guard_prepare_for_core_content_init(
       const char *core_path) __attribute__((weak_import));
 extern void joyemu_psp_vm_guard_rearm_after_core_shutdown(
@@ -4105,7 +4109,13 @@ static void uninit_libretro_symbols(
    location_driver_state_t *loc_st  = location_state_get_ptr();
 #ifdef HAVE_DYNAMIC
    if (runloop_st->lib_handle)
+   {
+#if defined(__APPLE__)
+      if (joyemu_je_azahar_mod_before_close)
+         joyemu_je_azahar_mod_before_close(runloop_st->lib_handle);
+#endif
       dylib_close(runloop_st->lib_handle);
+   }
    runloop_st->lib_handle = NULL;
 #endif
 
@@ -4192,6 +4202,10 @@ static bool core_unload_game(void)
    {
       RARCH_LOG("[Core] Unloading game...\n");
       runloop_st->current_core.retro_unload_game();
+#if defined(__APPLE__) && defined(HAVE_DYNAMIC)
+      if (joyemu_je_azahar_mod_after_drain)
+         joyemu_je_azahar_mod_after_drain(runloop_st->lib_handle);
+#endif
 #if defined(__APPLE__)
       /* PPSSPP releases its fixed memory views in retro_unload_game().
        * Reacquire the guard before video/core teardown can reuse them. */
@@ -4312,6 +4326,10 @@ void runloop_event_deinit_core(void)
    {
       RARCH_LOG("[Core] Unloading core...\n");
       runloop_st->current_core.retro_deinit();
+#if defined(__APPLE__) && defined(HAVE_DYNAMIC)
+      if (joyemu_je_azahar_mod_after_drain)
+         joyemu_je_azahar_mod_after_drain(runloop_st->lib_handle);
+#endif
 #if defined(__APPLE__)
       /* PPSSPP has now released its fixed Darwin memory views. Reserve the
        * same class of address layout before framework/video teardown can
@@ -7687,6 +7705,12 @@ int runloop_iterate(void)
       want_runahead                     = want_runahead && !netplay_is_enabled;
 #endif
 
+#if defined(__APPLE__) && defined(HAVE_DYNAMIC)
+      if (joyemu_je_azahar_mod_requires_unique_session &&
+            joyemu_je_azahar_mod_requires_unique_session())
+         core_run();
+      else
+#endif
       if (want_runahead)
          runahead_run(
                runloop_st,
@@ -8271,6 +8295,22 @@ bool core_load_game(retro_ctx_load_content_info_t *load_info)
    if (joyemu_psp_vm_guard_prepare_for_core_content_init)
       joyemu_psp_vm_guard_prepare_for_core_content_init(
             path_get(RARCH_PATH_CORE));
+#endif
+
+#if defined(__APPLE__) && defined(HAVE_DYNAMIC)
+   if (joyemu_je_azahar_mod_before_load)
+   {
+      settings_t *mod_settings = config_get_ptr();
+      bool unique_session = load_info && !load_info->special && load_info->info &&
+            mod_settings && !mod_settings->bools.run_ahead_enabled &&
+            !mod_settings->bools.preemptive_frames_enable && !mod_settings->bools.rewind_enable;
+#ifdef HAVE_NETWORKING
+      unique_session = unique_session && !netplay_driver_ctl(RARCH_NETPLAY_CTL_IS_ENABLED, NULL);
+#endif
+      if (!joyemu_je_azahar_mod_before_load(runloop_st->lib_handle,path_get(RARCH_PATH_CORE),
+            load_info && load_info->info ? load_info->info->path : NULL,unique_session))
+         return false;
+   }
 #endif
 
    if (load_info && load_info->special)
