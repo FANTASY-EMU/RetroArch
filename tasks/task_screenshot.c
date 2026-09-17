@@ -16,6 +16,7 @@
  */
 
 #include <stdint.h>
+#include <limits.h>
 #include <stddef.h>
 #include <string.h>
 #include <time.h>
@@ -519,6 +520,14 @@ static bool take_screenshot_raw(
    unsigned width   = video_st->frame_cache_width;
    unsigned height  = video_st->frame_cache_height;
    size_t pitch     = video_st->frame_cache_pitch;
+   unsigned bytes_per_pixel = pixel_format_type == RETRO_PIXEL_FORMAT_XRGB8888 ? 4 : 2;
+
+   /* A software core can hand off GPU surfaces instead of a CPU frame. */
+   if (!data || data == RETRO_HW_FRAME_BUFFER_VALID || !width || !height
+         || !pitch || pitch > INT_MAX || width > pitch / bytes_per_pixel
+         || height > SIZE_MAX / pitch)
+      return false;
+
    /* Negative pitch is needed as screenshot takes bottom-up,
     * but we use top-down.
     */
@@ -611,10 +620,11 @@ bool take_screenshot(
    bool prefer_vp_read            = false;
    if (supports_vp_read)
    {
-      /* Use VP read screenshots if it's a HW context core
-       * and read_frame_raw is not implemented */
-      if (      video_driver_is_hw_context()
-            && !video_st->current_video->read_frame_raw)
+      /* Native software-core surfaces also require a GPU readback,
+       * including savestate thumbnails when GPU screenshots are disabled. */
+      if (video_st->frame_cache_data == RETRO_HW_FRAME_BUFFER_VALID
+            || (video_driver_is_hw_context()
+               && !video_st->current_video->read_frame_raw))
          prefer_vp_read           = true;
       /* Avoid GPU screenshots with savestates */
       if (video_gpu_screenshot && !savestate)

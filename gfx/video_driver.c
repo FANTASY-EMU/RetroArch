@@ -4135,7 +4135,8 @@ void video_driver_frame(const void *data, unsigned width,
             pitch, runloop_idle);
 
 #ifdef HAVE_VIDEO_FILTER
-   if (render_frame && data && video_st->state_filter)
+   if (render_frame && data && video_st->state_filter
+         && data != RETRO_HW_FRAME_BUFFER_VALID)
    {
       unsigned output_width                             = 0;
       unsigned output_height                            = 0;

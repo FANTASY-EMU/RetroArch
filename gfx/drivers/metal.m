@@ -35,6 +35,9 @@
 #include <retro_miscellaneous.h>
 #include <retro_math.h>
 #include <libretro.h>
+#include <features/features_cpu.h>
+#include "joyemu_nds_video.h"
+#include "joyemu_nds_compute.h"
 
 #ifdef HAVE_CONFIG_H
 #include "../../config.h"
@@ -56,6 +59,7 @@
 #include "../../configuration.h"
 
 #include "../../retroarch.h"
+#include "../../runloop.h"
 #ifdef HAVE_REWIND
 #include "../../state_manager.h"
 #endif
@@ -826,9 +830,15 @@ font_renderer_t metal_raster_font = {
 
 - (instancetype)initWithDescriptor:(ViewDescriptor *)td context:(Context *)context;
 - (void)drawWithContext:(Context *)ctx;
+- (bool)prepareNDSFrame:(const struct joyemu_nds_native_frame *)frame;
+- (bool)updateNDSFrame:(const struct joyemu_nds_native_frame *)frame;
 - (void)drawWithEncoder:(id<MTLRenderCommandEncoder>)rce;
 - (void)drawWithEncoder:(id<MTLRenderCommandEncoder>)rce viewport:(MTLViewport)viewport;
 
+@end
+
+@interface MetalDriver()
+- (bool)stageNDSFrame:(struct joyemu_nds_native_frame *)frame;
 @end
 
 @interface MetalMenu()
@@ -848,6 +858,14 @@ font_renderer_t metal_raster_font = {
    Overlay *_overlay;
 
    video_info_t _video;
+   struct joyemu_nds_native_frame _ndsPendingFrame;
+   struct joyemu_nds_native_frame _ndsLastLayout;
+   bool _ndsFramePending;
+   bool _ndsPendingPaced;
+   bool _ndsPendingLayoutChanged;
+   bool _ndsHasLoggedNativeFrame;
+   uint64_t _ndsPendingInterval;
+   uint64_t _ndsLastPresentationTime;
 
    id<MTLDevice> _device;
    id<MTLLibrary> _library;
@@ -1143,6 +1161,44 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
    _skinVideoEffectUniforms.alpha = JEClampedSkinVideoEffectValue(effectAlpha, 0.82f, 0.0f, 1.0f);
 }
 
+- (bool)stageNDSFrame:(struct joyemu_nds_native_frame *)frame
+{
+   _ndsFramePending = false;
+   memset(&_ndsPendingFrame, 0, sizeof(_ndsPendingFrame));
+   bool fastForward = (runloop_state_get_ptr()->flags & RUNLOOP_FLAG_FASTMOTION) != 0;
+   if (!fastForward)
+      _ndsLastPresentationTime = 0;
+   id enabled = [[NSUserDefaults standardUserDefaults]
+         objectForKey:@"JoyEMU.JoyEngine.NDSNativeVideoEnabled"];
+   if ((enabled && ![enabled boolValue]) || !joyemu_nds_frame_valid(frame)
+       || ![_frameView prepareNDSFrame:frame])
+      return false;
+
+   bool layoutChanged = frame->canvas_width != _ndsLastLayout.canvas_width
+      || frame->canvas_height != _ndsLastLayout.canvas_height
+      || memcmp(&frame->top_rect, &_ndsLastLayout.top_rect, sizeof(frame->top_rect))
+      || memcmp(&frame->bottom_rect, &_ndsLastLayout.bottom_rect, sizeof(frame->bottom_rect));
+   double fps = video_state_get_ptr()->av_info.timing.fps;
+   if (!isfinite(fps) || fps <= 0.0)
+      fps = 60.0;
+   uint64_t interval = (uint64_t)(1000000.0 / fps);
+   uint64_t now = (uint64_t)cpu_features_get_time_usec();
+   if (joyemu_nds_should_skip(_ndsLastPresentationTime, now, interval,
+            fastForward && !_context.captureEnabled, layoutChanged))
+   {
+      frame->result = JOYEMU_NDS_VIDEO_SKIPPED;
+      return true;
+   }
+   /* Staging does not consume a presentation opportunity: begin may fail. */
+   _ndsPendingPaced = fastForward && !_context.captureEnabled;
+   _ndsPendingLayoutChanged = layoutChanged;
+   _ndsPendingInterval = interval;
+   _ndsPendingFrame = *frame;
+   _ndsFramePending = true;
+   frame->result = JOYEMU_NDS_VIDEO_ACCEPTED;
+   return true;
+}
+
 - (bool)renderFrame:(const void *)frame
                data:(void*)data
               width:(unsigned)width
@@ -1156,12 +1212,45 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
    {
       bool statistics_show = video_info->statistics_show;
 
+      /* Native pointers are borrowed only through this immediate callback.
+       * Cached hardware-sentinel replay has no pending descriptor. */
+      bool nativeFrame = frame == RETRO_HW_FRAME_BUFFER_VALID;
+      bool pending = nativeFrame && _ndsFramePending
+         && width == _ndsPendingFrame.canvas_width
+         && height == _ndsPendingFrame.canvas_height;
+      struct joyemu_nds_native_frame ndsFrame = _ndsPendingFrame;
+      bool ndsPaced = _ndsPendingPaced;
+      bool ndsLayoutChanged = _ndsPendingLayoutChanged;
+      uint64_t ndsInterval = _ndsPendingInterval;
+      _ndsFramePending = false;
+      memset(&_ndsPendingFrame, 0, sizeof(_ndsPendingFrame));
       JEFrameBeginResult beginResult = [self _beginFrame];
       if (beginResult != JEFrameBeginResultReady)
          return YES;
 
       _frameView.frameCount = frameCount;
-      if (frame && width && height)
+      if (pending)
+      {
+         bool composed = [_frameView updateNDSFrame:&ndsFrame];
+         _ndsLastPresentationTime = joyemu_nds_pacing_completed(
+               _ndsLastPresentationTime, (uint64_t)cpu_features_get_time_usec(),
+               ndsInterval, ndsPaced, ndsLayoutChanged, composed);
+         if (composed)
+         {
+            _ndsLastLayout = ndsFrame;
+            _ndsLastLayout.top = NULL;
+            _ndsLastLayout.bottom = NULL;
+            if (!_ndsHasLoggedNativeFrame)
+            {
+               _ndsHasLoggedNativeFrame = true;
+               RARCH_LOG("[Metal] NDS native composition active: canvas=%ux%u top=%dx%d bottom=%dx%d.\n",
+                     ndsFrame.canvas_width, ndsFrame.canvas_height,
+                     ndsFrame.top_rect.width, ndsFrame.top_rect.height,
+                     ndsFrame.bottom_rect.width, ndsFrame.bottom_rect.height);
+            }
+         }
+      }
+      else if (!nativeFrame && frame && width && height)
       {
          _frameView.size = CGSizeMake(width, height);
          [_frameView updateFrame:frame pitch:pitch];
@@ -1405,6 +1494,17 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
 - (void)drawInMTKView:(MTKView *)view { }
 @end
 
+bool joyemu_metal_stage_nds_frame(struct joyemu_nds_native_frame *frame)
+{
+   video_driver_state_t *video = video_state_get_ptr();
+   if (frame)
+      frame->result = JOYEMU_NDS_VIDEO_FALLBACK;
+   if (!video || video->current_video != &video_metal || !video->data)
+      return false;
+   MetalDriver *driver = (__bridge MetalDriver *)video->data;
+   return [driver stageNDSFrame:frame];
+}
+
 @implementation MetalMenu
 {
    Context *_context;
@@ -1537,6 +1637,9 @@ typedef struct MTLALIGN(16)
    video_viewport_t *_viewport;
    bool _hasLoggedShaderRenderState;
    bool _lastLoggedShaderActive;
+   id<MTLComputePipelineState> _ndsPipeline;
+   id<MTLTexture> _ndsCanvas;
+   bool _ndsDisabled;
    NSUInteger _lastLoggedDrawState;
 }
 
@@ -1746,7 +1849,8 @@ static NSString *je_metal_draw_state_name(NSUInteger drawState)
 
    /* Either no history, or we moved a texture of a different size in the front slot */
    if (   _engine.frame.texture[0].size_data.x != _size.width
-       || _engine.frame.texture[0].size_data.y != _size.height)
+       || _engine.frame.texture[0].size_data.y != _size.height
+       || _engine.frame.texture[0].view.storageMode == MTLStorageModePrivate)
    {
       MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                width:(NSUInteger)_size.width
@@ -1774,7 +1878,7 @@ static NSString *je_metal_draw_state_name(NSUInteger drawState)
    return res;
 }
 
-- (void)updateFrame:(void const *)src pitch:(NSUInteger)pitch
+- (void)_prepareFrame
 {
    if (_shader && (_engine.frame.output_size.x != _viewport->width
                ||  _engine.frame.output_size.y != _viewport->height))
@@ -1793,9 +1897,12 @@ static NSString *je_metal_draw_state_name(NSUInteger drawState)
 
    if (resize_render_targets)
       [self _updateRenderTargets];
+}
 
+- (void)updateFrame:(void const *)src pitch:(NSUInteger)pitch
+{
+   [self _prepareFrame];
    [self _updateHistory];
-
    if (   _format == RPixelFormatBGRA8Unorm
        || _format == RPixelFormatBGRX8Unorm)
    {
@@ -1811,6 +1918,84 @@ static NSString *je_metal_draw_state_name(NSUInteger drawState)
               bytesPerRow:(NSUInteger)(pitch)];
       _srcDirty = YES;
    }
+}
+
+- (bool)prepareNDSFrame:(const struct joyemu_nds_native_frame *)frame
+{
+   if (_ndsDisabled || _shader
+       || (_format != RPixelFormatBGRA8Unorm && _format != RPixelFormatBGRX8Unorm))
+      return false;
+   if (!_ndsPipeline)
+   {
+      NSError *error = nil;
+      id<MTLLibrary> library = [_context.device newLibraryWithSource:
+            [NSString stringWithUTF8String:joyemu_nds_compute_source] options:nil error:&error];
+      id<MTLFunction> function = [library newFunctionWithName:@"joyemu_nds_compose"];
+      if (function)
+         _ndsPipeline = [_context.device newComputePipelineStateWithFunction:function error:&error];
+      if (!_ndsPipeline)
+      {
+         _ndsDisabled = true;
+         RARCH_WARN("[Metal] NDS native composition unavailable: %s.\n", error.localizedDescription.UTF8String);
+         return false;
+      }
+   }
+   if (!_ndsCanvas || _ndsCanvas.width != frame->canvas_width
+                   || _ndsCanvas.height != frame->canvas_height)
+   {
+      MTLTextureDescriptor *td = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+            width:frame->canvas_width height:frame->canvas_height mipmapped:NO];
+      td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+      td.storageMode = MTLStorageModePrivate;
+      id<MTLTexture> canvas = [_context.device newTextureWithDescriptor:td];
+      if (!canvas)
+         return false;
+      _ndsCanvas = canvas;
+   }
+   return true;
+}
+
+- (bool)updateNDSFrame:(const struct joyemu_nds_native_frame *)frame
+{
+   /* begin has acquired an in-flight slot. The existing three-chain allocator
+    * retains these copied pixels until this command buffer completes. */
+   BufferRange range;
+   const NSUInteger screenBytes = 256 * 192 * sizeof(uint32_t);
+   if (![_context allocRange:&range length:screenBytes * 2]
+       || !range.data || !range.buffer)
+      goto unavailable;
+   memcpy(range.data, frame->top, screenBytes);
+   memcpy((uint8_t *)range.data + screenBytes, frame->bottom, screenBytes);
+   {
+      id<MTLComputeCommandEncoder> encoder = [_context.commandBuffer computeCommandEncoder];
+      if (!encoder)
+         goto unavailable;
+      struct joyemu_nds_compute_params params;
+      memcpy(params.top, &frame->top_rect, sizeof(params.top));
+      memcpy(params.bottom, &frame->bottom_rect, sizeof(params.bottom));
+      [encoder setComputePipelineState:_ndsPipeline];
+      [encoder setBuffer:range.buffer offset:range.offset atIndex:0];
+      [encoder setBuffer:range.buffer offset:range.offset + screenBytes atIndex:1];
+      [encoder setBytes:&params length:sizeof(params) atIndex:2];
+      [encoder setTexture:_ndsCanvas atIndex:0];
+      [encoder dispatchThreadgroups:MTLSizeMake((frame->canvas_width + 15) / 16,
+                  (frame->canvas_height + 15) / 16, 1)
+             threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+      [encoder endEncoding];
+   }
+   /* Publish only after successful encoding, so resource failure replays the
+    * previous cached canvas and the next core frame uses software fallback. */
+   self.size = CGSizeMake(frame->canvas_width, frame->canvas_height);
+   STRUCT_ASSIGN(_engine.frame.texture[0].view, _ndsCanvas);
+   _engine.frame.texture[0].size_data = (float4_t){frame->canvas_width,
+         frame->canvas_height, 1.0f / frame->canvas_width, 1.0f / frame->canvas_height};
+   [self _prepareFrame];
+   return true;
+unavailable:
+   _ndsDisabled = true;
+   RARCH_WARN("[Metal] NDS native composition resource failure; using software from next frame.\n");
+   return false;
 }
 
 - (void)_initTexture:(texture_t *)t withDescriptor:(MTLTextureDescriptor *)td

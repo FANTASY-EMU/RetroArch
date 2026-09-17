@@ -1188,6 +1188,15 @@ matrix_float4x4 matrix_proj_ortho(float left, float right, float top, float bott
 
    [_commandBuffer commit];
 
+   /* CPU screenshot readback immediately follows cached-frame presentation.
+    * getBytes does not wait for GPU writes; ordinary presentation stays async. */
+   if (atomic_load_explicit(&_captureEnabled, memory_order_acquire))
+   {
+      [_commandBuffer waitUntilCompleted];
+      if (_commandBuffer.status != MTLCommandBufferStatusCompleted)
+         _backBufferCaptureCompatible = false;
+   }
+
    _commandBuffer = nil;
    _drawable = nil;
    _drawableCaptureCompatible = false;

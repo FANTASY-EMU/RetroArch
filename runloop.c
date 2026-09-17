@@ -21,6 +21,7 @@
 
 #include "input/input_driver.h"
 #include "joyemu_cadence_trace_compat.h"
+#include "gfx/drivers/joyemu_nds_video.h"
 #ifdef _WIN32
 #ifdef _XBOX
 #include <xtl.h>
@@ -1582,6 +1583,25 @@ bool runloop_environment_cb(unsigned cmd, void *data)
 
    switch (cmd)
    {
+      case JOYEMU_ENVIRONMENT_NDS_NATIVE_FRAME:
+      {
+#if defined(HAVE_COCOA_METAL)
+         video_driver_state_t *video = video_state_get_ptr();
+         recording_state_t *recording = recording_state_get_ptr();
+         /* Borrowed screen pointers require synchronous consumption. CPU
+          * filters and recording require the original software framebuffer. */
+         if (video->threaded || recording->data)
+            return false;
+#ifdef HAVE_VIDEO_FILTER
+         if (video->state_filter)
+            return false;
+#endif
+         return joyemu_metal_stage_nds_frame(
+               (struct joyemu_nds_native_frame *)data);
+#else
+         return false;
+#endif
+      }
       case RETRO_ENVIRONMENT_GET_OVERSCAN:
          {
             bool video_crop_overscan = settings->bools.video_crop_overscan;
