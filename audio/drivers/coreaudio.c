@@ -40,10 +40,11 @@
 #include "../../verbosity.h"
 #include "../../runloop.h"
 #include "../../joyemu_cadence_trace_compat.h"
+#include <sys/time.h>
 
 typedef struct coreaudio_observation
 {
-   uint64_t callbacks, requested, zeroed, held;
+   uint64_t callbacks, requested, zeroed, held, underruns;
    uint64_t offered, accepted, writes, short_writes, write_us, max_write_gap_us;
 } coreaudio_observation_t;
 
@@ -62,6 +63,7 @@ typedef struct coreaudio
    bool is_paused;
    bool nonblock;
    bool observe_audio;
+   bool observe_nds;
    double observed_rate;
    retro_time_t observation_start, previous_write;
    coreaudio_observation_t observation; /* Protected by the existing FIFO lock. */
@@ -69,7 +71,8 @@ typedef struct coreaudio
 
 static bool coreaudio_should_observe(const char *core, const char *setting)
 {
-   return string_is_equal(core, "Azahar") && string_is_equal(setting, "1");
+   return string_is_equal(core, "melonDS DS")
+      || (string_is_equal(core, "Azahar") && string_is_equal(setting, "1"));
 }
 
 /* Called only from the producer/teardown thread. Never log from RemoteIO. */
@@ -78,11 +81,12 @@ static void coreaudio_report_observation(coreaudio_t *dev, bool force)
    coreaudio_observation_t value;
    retro_time_t now, elapsed;
    size_t queued;
+   struct timeval wall;
    if (!dev->observe_audio || !dev->lock)
       return;
    now = cpu_features_get_time_usec();
    elapsed = now - dev->observation_start;
-   if (!force && elapsed < 1000000)
+   if (!force && elapsed < (dev->observe_nds ? 2000000 : 1000000))
       return;
    slock_lock(dev->lock);
    value = dev->observation;
@@ -90,16 +94,22 @@ static void coreaudio_report_observation(coreaudio_t *dev, bool force)
    queued = dev->buffer ? FIFO_READ_AVAIL(dev->buffer) : 0;
    dev->observation_start = now;
    slock_unlock(dev->lock);
-   fprintf(stderr, "AZAHAR-AUDIO window_us=%lld rate=%.0f frame_bytes=%zu capacity=%zu "
+   gettimeofday(&wall, NULL);
+   fprintf(stderr, "%s wall_ms=%lld monotonic_us=%lld window_us=%lld rate=%.0f frame_bytes=%zu capacity=%zu "
          "callbacks=%llu requested=%llu zeroed=%llu held=%llu offered=%llu accepted=%llu "
-         "writes=%llu short_writes=%llu write_us=%llu max_write_gap_us=%llu queued=%zu final=%d\n",
+         "writes=%llu short_writes=%llu write_us=%llu max_write_gap_us=%llu queued=%zu "
+         "underruns=%llu silence_pct=%.2f paused=%d final=%d\n",
+         dev->observe_nds ? "[JE-NDS-AUDIO]" : "AZAHAR-AUDIO",
+         (long long)wall.tv_sec * 1000 + wall.tv_usec / 1000, (long long)now,
          (long long)elapsed, dev->observed_rate, 2 * sizeof(float), dev->buffer_size,
          (unsigned long long)value.callbacks, (unsigned long long)value.requested,
          (unsigned long long)value.zeroed, (unsigned long long)value.held,
          (unsigned long long)value.offered, (unsigned long long)value.accepted,
          (unsigned long long)value.writes, (unsigned long long)value.short_writes,
          (unsigned long long)value.write_us, (unsigned long long)value.max_write_gap_us,
-         queued, force);
+         queued, (unsigned long long)value.underruns,
+         value.requested ? 100.0 * value.zeroed / value.requested : 0.0,
+         dev->is_paused, force);
 }
 
 static void coreaudio_free(void *data)
@@ -152,26 +162,52 @@ static OSStatus coreaudio_audio_write_cb(void *userdata,
 
    slock_lock(dev->lock);
 
-   if (dev->observe_audio)
+   if (dev->observe_nds)
    {
       size_t available = FIFO_READ_AVAIL(dev->buffer);
+      /* Stereo float frames only. Consume present sound immediately; retain
+       * at most an incomplete frame, instead of holding an entire callback. */
+      size_t consumed = (available < write_avail ? available : write_avail) & ~(size_t)7;
       dev->observation.callbacks++;
       dev->observation.requested += write_avail;
-      if (available < write_avail)
+      if (consumed < write_avail)
       {
-         dev->observation.zeroed += write_avail;
-         dev->observation.held += available;
+         dev->observation.underruns++;
+         dev->observation.zeroed += write_avail - consumed;
+         dev->observation.held += available - consumed;
       }
-   }
-
-   if (FIFO_READ_AVAIL(dev->buffer) < write_avail)
-   {
-      *action_flags = kAudioUnitRenderAction_OutputIsSilence;
-      /* Seems to be needed. */
-      memset(outbuf, 0, write_avail);
+      if (consumed)
+      {
+         fifo_read(dev->buffer, outbuf, consumed);
+         *action_flags &= ~kAudioUnitRenderAction_OutputIsSilence;
+      }
+      else
+         *action_flags |= kAudioUnitRenderAction_OutputIsSilence;
+      if (consumed < write_avail)
+         memset((uint8_t*)outbuf + consumed, 0, write_avail - consumed);
    }
    else
-      fifo_read(dev->buffer, outbuf, write_avail);
+   {
+      if (dev->observe_audio)
+      {
+         size_t available = FIFO_READ_AVAIL(dev->buffer);
+         dev->observation.callbacks++;
+         dev->observation.requested += write_avail;
+         if (available < write_avail)
+         {
+            dev->observation.underruns++;
+            dev->observation.zeroed += write_avail;
+            dev->observation.held += available;
+         }
+      }
+      if (FIFO_READ_AVAIL(dev->buffer) < write_avail)
+      {
+         *action_flags = kAudioUnitRenderAction_OutputIsSilence;
+         memset(outbuf, 0, write_avail);
+      }
+      else
+         fifo_read(dev->buffer, outbuf, write_avail);
+   }
    slock_unlock(dev->lock);
    scond_signal(dev->cond);
    return noErr;
@@ -264,6 +300,8 @@ static void *coreaudio_init(const char *device,
    dev->observe_audio = coreaudio_should_observe(
          runloop_state_get_ptr()->system.info.library_name,
          getenv("JOY_AZAHAR_AUDIO_DIAGNOSTICS"));
+   dev->observe_nds = string_is_equal(
+         runloop_state_get_ptr()->system.info.library_name, "melonDS DS");
 
    /* Create AudioComponent */
    desc.componentType         = kAudioUnitType_Output;

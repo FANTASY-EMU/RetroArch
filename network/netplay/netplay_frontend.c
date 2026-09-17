@@ -81,6 +81,10 @@
 #endif
 
 #include "netplay_private.h"
+#ifdef __APPLE__
+#define JE_NDS_TRACE(...) RARCH_LOG(__VA_ARGS__)
+#include "joy_nds_dual_transport.h"
+#endif
 
 #ifdef TCP_NODELAY
 #define SET_TCP_NODELAY(fd) \
@@ -729,6 +733,11 @@ static void netplay_send_cmd_netpacket(netplay_t *netplay, size_t conn_i,
 static void RETRO_CALLCONV netplay_netpacket_send_cb(int flags,
       const void* buf, size_t len, uint16_t client_id);
 static void RETRO_CALLCONV netplay_netpacket_poll_receive_cb(void);
+#ifdef __APPLE__
+static void joy_nds_poll(netplay_t *netplay);
+static bool joy_nds_receive_tcp(netplay_t *netplay, struct netplay_connection *connection, const void *buf, size_t len);
+static bool joy_nds_queue(netplay_t *netplay, struct netplay_connection *connection, uint32_t cmd, const void *buf, size_t len);
+#endif
 
 /*
  * netplay_init_socket_buffer
@@ -4194,6 +4203,11 @@ static void netplay_hangup(netplay_t *netplay,
    was_playing = connection->mode == NETPLAY_CONNECTION_PLAYING ||
       connection->mode == NETPLAY_CONNECTION_SLAVE;
 
+#ifdef __APPLE__
+   je_nds_destroy(connection->joy_nds_dual);
+   connection->joy_nds_dual = NULL;
+   connection->joy_nds_attempted = false;
+#endif
    /* Report this disconnection */
    if (netplay->is_server)
    {
@@ -4494,6 +4508,12 @@ bool netplay_send_raw_cmd(netplay_t *netplay,
    size_t len)
 {
    uint32_t cmdbuf[2];
+#ifdef __APPLE__
+   /* PING and other control messages share the reliable queue. They must not
+    * reintroduce a blocking overflow flush while the UDP path is running. */
+   if (connection->joy_nds_dual)
+      return joy_nds_queue(netplay, connection, cmd, data, len);
+#endif
 
    cmdbuf[0] = htonl(cmd);
    cmdbuf[1] = htonl(len);
@@ -4550,7 +4570,11 @@ static void netplay_send_flush_all(netplay_t *netplay,
             && (connection->mode >= NETPLAY_CONNECTION_CONNECTED))
       {
          if (!netplay_send_flush(&connection->send_packet_buffer,
-            connection->fd, true))
+            connection->fd,
+#ifdef __APPLE__
+            connection->joy_nds_dual ? false :
+#endif
+            true))
             netplay_hangup(netplay, connection);
       }
    }
@@ -6397,6 +6421,17 @@ static bool netplay_get_cmd(netplay_t *netplay,
             break;
          }
 
+#ifdef __APPLE__
+      case JE_NDS_CMD:
+         {
+            uint8_t packet[JE_NDS_HEADER + JE_NDS_MAX];
+            if (cmd_size > sizeof(packet)) return false;
+            RECV(packet, cmd_size)
+               return false;
+            if (!joy_nds_receive_tcp(netplay, connection, packet, cmd_size)) return false;
+            break;
+         }
+#endif
       case NETPLAY_CMD_NETPACKET:
          {
             uint32_t pkt_client_id;
@@ -6623,7 +6658,9 @@ static void netplay_poll_net_input(netplay_t *netplay)
    size_t i;
    bool had_input;
    struct netplay_connection *connection;
-
+#ifdef __APPLE__
+   joy_nds_poll(netplay);
+#endif
    do
    {
       had_input = false;
@@ -6639,6 +6676,9 @@ static void netplay_poll_net_input(netplay_t *netplay)
          }
       }
    } while (had_input);
+#ifdef __APPLE__
+   joy_nds_poll(netplay);
+#endif
 }
 
 /**
@@ -7267,6 +7307,10 @@ static void netplay_free(netplay_t *netplay)
    {
       struct netplay_connection *connection = &netplay->connections[i];
 
+#ifdef __APPLE__
+      je_nds_destroy(connection->joy_nds_dual);
+      connection->joy_nds_dual = NULL;
+#endif
       if (connection->flags & NETPLAY_CONN_FLAG_ACTIVE)
       {
          socket_close(connection->fd);
@@ -9892,6 +9936,139 @@ bool netplay_decode_hostname(const char *hostname,
  *
  * Send a netpacket command to a connected peer.
  */
+#ifdef __APPLE__
+struct joy_nds_delivery { netplay_t *netplay; struct netplay_connection *connection; };
+static void joy_nds_deliver(void *opaque, const void *buf, size_t len)
+{
+   struct joy_nds_delivery *delivery = (struct joy_nds_delivery*)opaque;
+   uint16_t id = delivery->netplay->is_server
+      ? (uint16_t)(delivery->connection - delivery->netplay->connections + 1) : 0;
+   if (networking_driver_st.core_netpacket_interface && networking_driver_st.core_netpacket_interface->receive)
+      networking_driver_st.core_netpacket_interface->receive(buf, len, id);
+}
+/* Reserve the complete framed command before any write. netplay_send cannot
+ * enter its blocking overflow branch after this preflight on the core thread. */
+static bool joy_nds_queue(netplay_t *netplay, struct netplay_connection *connection,
+      uint32_t cmd, const void *buf, size_t len)
+{
+   uint32_t header[2];
+   struct socket_buffer *sbuf = &connection->send_packet_buffer;
+   (void)netplay;
+   if (buf_remaining(sbuf) < sizeof(header)+len &&
+       !netplay_send_flush(sbuf, connection->fd, false)) return false;
+   if (buf_remaining(sbuf) < sizeof(header)+len) {
+      RARCH_ERR("[JE-NDS-TRANSPORT] build=nds-dual-v31 failure=tcp_queue_full queued=%u needed=%u capacity=%u cmd=%u\n",
+         (unsigned)buf_used(sbuf),(unsigned)(sizeof(header)+len),(unsigned)sbuf->bufsz,cmd);
+      return false;
+   }
+   header[0]=htonl(cmd);header[1]=htonl((uint32_t)len);
+   return netplay_send(sbuf, connection->fd, header, sizeof(header)) &&
+      (!len || netplay_send(sbuf, connection->fd, buf, len));
+}
+static bool joy_nds_receive_tcp(netplay_t *netplay, struct netplay_connection *connection,
+      const void *buf, size_t len)
+{
+   struct joy_nds_delivery delivery = {netplay, connection};
+   struct je_nds_dual *s = connection->joy_nds_dual;
+   int result;
+   /* PLAYING can be reached midway through this TCP poll. Initialize before
+    * consuming the first offer, not only at the next outer frame poll. */
+   if (!s) { joy_nds_poll(netplay); s=connection->joy_nds_dual; }
+   /* Local unsupported core/UDP initialization failure stays on raw TCP. */
+   if (!s) return true;
+   result=je_nds_receive(s, (const uint8_t*)buf, len, false, joy_nds_deliver, &delivery);
+   if(result<0) RARCH_ERR("[JE-NDS-TRANSPORT] build=nds-dual-v31 failure=tcp_envelope_rejected bytes=%u seqNext=%llu\n",
+      (unsigned)len,(unsigned long long)s->rx_seq);
+   if (result==2)
+   {
+      uint8_t barrier[JE_NDS_HEADER];
+      je_nds_barrier(s,barrier);
+      if (!joy_nds_queue(netplay, connection, JE_NDS_CMD, barrier, sizeof(barrier))) return false;
+      s->tx_ready=true;
+      RARCH_LOG("[JE-NDS-TRANSPORT] build=nds-dual-v31 mode=udp-race-tcp barrier=queued\n");
+   }
+   return result>=0;
+}
+static void joy_nds_poll(netplay_t *netplay)
+{
+   size_t i;
+   if (netplay->modus != NETPLAY_MODUS_CORE_PACKET_INTERFACE) return;
+   for (i=0;i<netplay->connections_size;i++)
+   {
+      struct netplay_connection *connection=&netplay->connections[i];
+      struct je_nds_dual *s;
+      struct joy_nds_delivery delivery={netplay,connection};
+      int64_t now;
+      if (!(connection->flags & NETPLAY_CONN_FLAG_ACTIVE) || connection->mode!=NETPLAY_CONNECTION_PLAYING) continue;
+      if (!connection->joy_nds_attempted)
+      {
+         const char *name=runloop_state_get_ptr()->system.info.library_name;
+         connection->joy_nds_attempted=true;
+         if (!name || strcmp(name,"melonDS DS")) continue;
+         connection->joy_nds_dual=je_nds_create(connection->fd);
+         if (connection->joy_nds_dual)
+         {
+            uint8_t offer[JE_NDS_HEADER];
+            const struct je_nds_dual *service=connection->joy_nds_dual;
+            RARCH_LOG("[JE-NDS-QOS] build=nds-dual-v31 requested=5 udpService=%d tcpService=%d udpError=%d tcpError=%d\n",
+               service->udp_service,service->tcp_service,service->udp_service_error,service->tcp_service_error);
+            je_nds_offer(connection->joy_nds_dual,offer);
+            if (!joy_nds_queue(netplay, connection, JE_NDS_CMD, offer, sizeof(offer)))
+            { netplay_hangup(netplay,connection);continue; }
+            RARCH_LOG("[JE-NDS-TRANSPORT] build=nds-dual-v31 mode=tcp negotiating_udp=1\n");
+         }
+      }
+      s=connection->joy_nds_dual;if(!s)continue;
+      now=cpu_features_get_time_usec();
+      if (s->poll_at && now-s->poll_at>s->max_poll_gap)s->max_poll_gap=now-s->poll_at;
+      s->poll_at=now;
+      je_nds_poll_udp(s,joy_nds_deliver,&delivery);
+      if (!netplay_send_flush(&connection->send_packet_buffer,connection->fd,false))
+      {netplay_hangup(netplay,connection);continue;}
+      if (now-s->report_at>=2000000)
+      {
+         struct tcp_connection_info info; socklen_t info_len=sizeof(info);
+         int nodelay=-1; socklen_t option_len=sizeof(nodelay);
+         bool info_ok;
+         int64_t udp_now=je_nds_now();
+         memset(&info,0,sizeof(info));
+         info_ok=getsockopt(connection->fd,IPPROTO_TCP,TCP_CONNECTION_INFO,&info,&info_len)==0;
+         getsockopt(connection->fd,IPPROTO_TCP,TCP_NODELAY,&nodelay,&option_len);
+         s->report_at=now;
+         RARCH_LOG("[JE-NDS-TRANSPORT] build=nds-dual-v31 monotonicUs=%lld seqTx=%llu seqNext=%llu udpTx=%llu udpRx=%llu udpFirst=%llu tcpFirst=%llu tcpBackfill=%llu duplicates=%llu rejected=%llu udpSendErrors=%llu maxGap=%llu pollGapMaxUs=%lld tcpQueued=%u tcpInfo=%d tcpNoDelay=%d tcpRttMs=%u tcpRtoMs=%u tcpRetransmits=%llu tcpSocketBytes=%u repair=%d retryTimer=%llu retryNack=%llu ackRx=%llu nackRx=%llu retryLimited=%llu gapMaxUs=%lld retryLateMaxUs=%lld ackRttUs=%lld retryRtoUs=%lld cachePressure=%llu udpLastErrno=%d udpWouldBlock=%llu udpNoBuffers=%llu udpOtherErrors=%llu udpSuppressed=%llu udpCooldownUs=%lld udpDataCooldownUs=%lld udpDataSuppressed=%llu nackAckAdvance=%llu nackCacheMiss=%llu\n",
+            (long long)now,(unsigned long long)s->tx_seq,(unsigned long long)s->rx_seq,
+            (unsigned long long)s->udp_sent,(unsigned long long)s->udp_received,
+            (unsigned long long)s->udp_delivered,(unsigned long long)s->tcp_delivered,
+            (unsigned long long)s->tcp_backfills,(unsigned long long)s->duplicates,
+            (unsigned long long)s->rejected,(unsigned long long)s->udp_send_errors,
+            (unsigned long long)s->max_gap,(long long)s->max_poll_gap,
+            (unsigned)buf_used(&connection->send_packet_buffer),info_ok,nodelay,
+            info.tcpi_rttcur,info.tcpi_rto,(unsigned long long)info.tcpi_txretransmitpackets,info.tcpi_snd_sbbytes,
+            s->repair_ready,(unsigned long long)s->retry_timer,(unsigned long long)s->retry_nack,
+            (unsigned long long)s->ack_received,(unsigned long long)s->nack_received,
+            (unsigned long long)s->retry_limited,(long long)s->max_gap_us,(long long)s->max_retry_late_us,(long long)s->ack_rtt_us,
+            (long long)(s->retry_rto_us?s->retry_rto_us:40000),(unsigned long long)s->cache_pressure,
+            s->udp_last_errno,(unsigned long long)s->udp_wouldblock,(unsigned long long)s->udp_enobufs,
+            (unsigned long long)s->udp_other_errors,(unsigned long long)s->udp_suppressed,
+            (long long)(s->udp_resume_at>udp_now?s->udp_resume_at-udp_now:0),
+            (long long)(s->udp_data_resume_at>udp_now?s->udp_data_resume_at-udp_now:0),
+            (unsigned long long)s->udp_data_suppressed,(unsigned long long)s->nack_ack_advance,
+            (unsigned long long)s->nack_cache_miss);
+         {
+            static const char *kinds[]={"cmd","reply","ack","other"};unsigned k;
+            for(k=0;k<4;k++) {
+               const struct je_nds_latency *q=&s->order_latency[k],*a=&s->kernel_latency[k];
+               RARCH_LOG("[JE-NDS-TRANSPORT-LATENCY] build=nds-dual-v31 monotonicUs=%lld port=%u kind=%s orderCount=%llu orderUs=%llu orderMaxUs=%llu blocked=%llu kernelCount=%llu kernelUs=%llu kernelMaxUs=%llu kernelMissing=%llu timestampError=%d\n",
+                  (long long)udp_now,(unsigned)s->port,kinds[k],(unsigned long long)q->count,(unsigned long long)q->total_us,(unsigned long long)q->max_us,(unsigned long long)q->blocked,
+                  (unsigned long long)a->count,(unsigned long long)a->total_us,(unsigned long long)a->max_us,(unsigned long long)s->kernel_missing,s->timestamp_error);
+            }
+         }
+         s->max_poll_gap=0;
+      }
+   }
+}
+#endif
+
 static void netplay_send_cmd_netpacket(netplay_t *netplay, size_t conn_idx,
       const void* buf, size_t len, uint16_t pkt_client_id)
 {
@@ -9905,12 +10082,39 @@ static void netplay_send_cmd_netpacket(netplay_t *netplay, size_t conn_idx,
    if (!(connection->flags & NETPLAY_CONN_FLAG_ACTIVE)) return;
    if (connection->mode != NETPLAY_CONNECTION_PLAYING) return;
 
+#ifdef __APPLE__
+   if (connection->joy_nds_dual && connection->joy_nds_dual->tx_ready)
+   {
+      uint8_t packet[JE_NDS_HEADER + JE_NDS_MAX];
+      size_t packet_len = je_nds_encode(connection->joy_nds_dual, buf, len, packet);
+      if (!packet_len || !joy_nds_queue(netplay, connection, JE_NDS_CMD, packet, packet_len))
+      {
+         netplay_hangup(netplay, connection);
+         return;
+      }
+      je_nds_send_udp(connection->joy_nds_dual, packet, packet_len);
+      return;
+   }
+#endif
    cmdbuf[0] = htonl(NETPLAY_CMD_NETPACKET);
    cmdbuf[1] = htonl(len);
    cmdbuf[2] = htonl(pkt_client_id);
 
    sbuf = &connection->send_packet_buffer;
    need_flush = (buf_remaining(sbuf) < sizeof(cmdbuf)+len);
+#ifdef __APPLE__
+   if (connection->joy_nds_dual && need_flush)
+   {
+      if (!netplay_send_flush(sbuf, connection->fd, false) ||
+          buf_remaining(sbuf) < sizeof(cmdbuf)+len)
+      {
+         RARCH_WARN("[JE-NDS-TRANSPORT] reliable_queue_full; closing instead of blocking core.\n");
+         netplay_hangup(netplay, connection);
+         return;
+      }
+      need_flush = false;
+   }
+#endif
 
    if (     (need_flush && !netplay_send_flush(sbuf, connection->fd, true))
          || (!netplay_send(sbuf, connection->fd, cmdbuf, sizeof(cmdbuf)))

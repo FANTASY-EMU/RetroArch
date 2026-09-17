@@ -370,6 +370,10 @@ enum netplay_connection_flags
 /* Each connection gets a connection struct */
 struct netplay_connection
 {
+#ifdef __APPLE__
+   struct je_nds_dual *joy_nds_dual;
+   bool joy_nds_attempted;
+#endif
    /* Timer used to estimate a connection's latency */
    retro_time_t ping_timer;
 
