@@ -1017,6 +1017,22 @@ bool audio_driver_dsp_filter_init(const char *device)
 }
 #endif
 
+void audio_driver_set_network_latency(bool active)
+{
+#ifdef HAVE_COREAUDIO
+   audio_driver_state_t *audio_st = &audio_driver_st;
+   if (audio_st->current_audio == &audio_coreaudio && audio_st->context_audio_data)
+   {
+      size_t size = coreaudio_set_network_latency(audio_st->context_audio_data, active);
+      /* Rate control must use the SAME capacity as the producer. */
+      if (size)
+         audio_st->buffer_size = size;
+   }
+#else
+   (void)active;
+#endif
+}
+
 void audio_driver_set_buffer_size(size_t bufsize)
 {
    audio_driver_st.buffer_size = bufsize;

@@ -266,6 +266,9 @@ void audio_driver_dsp_filter_free(void);
 bool audio_driver_dsp_filter_init(const char *device);
 
 void audio_driver_set_buffer_size(size_t bufsize);
+/* Emulation-thread only; follows the negotiated NDS network pacing token. */
+void audio_driver_set_network_latency(bool active);
+size_t coreaudio_set_network_latency(void *data, bool active);
 
 bool audio_driver_get_devices_list(void **ptr);
 

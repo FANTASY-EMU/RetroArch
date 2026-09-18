@@ -8427,6 +8427,11 @@ void core_reset(void)
    runloop_st->current_core.retro_reset();
 }
 
+#if JOYENGINE_V2
+extern void joyemu_je_input_begin_frame(void);
+extern void joyemu_je_input_end_frame(void);
+#endif
+
 void core_run(void)
 {
    runloop_state_t *runloop_st = &runloop_state;
@@ -8451,6 +8456,10 @@ void core_run(void)
       video_driver_cached_frame();
       return;
    }
+#endif
+
+#if JOYENGINE_V2
+   joyemu_je_input_begin_frame();
 #endif
 
    if (early_polling)
@@ -8484,6 +8493,10 @@ void core_run(void)
    if (      late_polling
          && (!(current_core->flags & RETRO_CORE_FLAG_INPUT_POLLED)))
       input_driver_poll();
+
+#if JOYENGINE_V2
+   joyemu_je_input_end_frame();
+#endif
 
 #ifdef HAVE_NETWORKING
    netplay_driver_ctl(RARCH_NETPLAY_CTL_POST_FRAME, NULL);

@@ -88,6 +88,12 @@ static bool joyemu_metal_nonblocking_frame_acquisition_enabled(void)
    return override ? [override boolValue] : true;
 }
 
+#if JOYENGINE_V2
+extern bool joyemu_je_cooperative_frame_pacing_active(void);
+#else
+static bool joyemu_je_cooperative_frame_pacing_active(void) { return false; }
+#endif
+
 #if defined(HAVE_COCOATOUCH)
 static bool joyemu_metal_nds_touch_diag_enabled(void)
 {
@@ -838,6 +844,7 @@ font_renderer_t metal_raster_font = {
 @end
 
 @interface MetalDriver()
+@property (nonatomic) bool requestedNonBlocking;
 - (bool)stageNDSFrame:(struct joyemu_nds_native_frame *)frame;
 @end
 
@@ -1211,6 +1218,11 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
    @autoreleasepool
    {
       bool statistics_show = video_info->statistics_show;
+      // NDS has an explicit host deadline; waiting for vsync here would block
+      // UIKit. Capture still uses Context's existing synchronous fallback.
+      _context.nonBlockingFrameAcquisition =
+         (self.requestedNonBlocking || joyemu_je_cooperative_frame_pacing_active())
+         && joyemu_metal_nonblocking_frame_acquisition_enabled();
 
       /* Native pointers are borrowed only through this immediate callback.
        * Cached hardware-sentinel replay has no pending descriptor. */
@@ -2880,7 +2892,8 @@ static void metal_set_nonblock_state(void *data, bool non_block,
       bool adaptive_vsync_enabled, unsigned swap_interval)
 {
    MetalDriver *md = (__bridge MetalDriver *)data;
-   bool effectiveNonBlocking = non_block
+   md.requestedNonBlocking = non_block;
+   bool effectiveNonBlocking = (non_block || joyemu_je_cooperative_frame_pacing_active())
       && joyemu_metal_nonblocking_frame_acquisition_enabled();
    if (md.context.nonBlockingFrameAcquisition != effectiveNonBlocking)
    {

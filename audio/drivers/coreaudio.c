@@ -59,6 +59,7 @@ typedef struct coreaudio
 #endif
    fifo_buffer_t *buffer;
    size_t buffer_size;
+   size_t base_buffer_size, network_buffer_size;
    bool dev_alive;
    bool is_paused;
    bool nonblock;
@@ -68,6 +69,30 @@ typedef struct coreaudio
    retro_time_t observation_start, previous_write;
    coreaudio_observation_t observation; /* Protected by the existing FIFO lock. */
 } coreaudio_t;
+
+/* The physical FIFO reserves network headroom at init. Its logical capacity
+ * follows the emulation-thread policy, without allocation or copying on RemoteIO.
+ * After shrinking, drain all queued PCM before accepting more; never truncate. */
+static size_t coreaudio_writable_locked(const coreaudio_t *dev)
+{
+   size_t queued = FIFO_READ_AVAIL(dev->buffer);
+   size_t logical = queued < dev->buffer_size ? dev->buffer_size - queued : 0;
+   size_t physical = FIFO_WRITE_AVAIL(dev->buffer);
+   return logical < physical ? logical : physical;
+}
+
+size_t coreaudio_set_network_latency(void *data, bool active)
+{
+   coreaudio_t *dev = (coreaudio_t*)data;
+   size_t size;
+   if (!dev || !dev->observe_nds)
+      return 0;
+   slock_lock(dev->lock);
+   size = active ? dev->network_buffer_size : dev->base_buffer_size;
+   dev->buffer_size = size;
+   slock_unlock(dev->lock);
+   return size;
+}
 
 static bool coreaudio_should_observe(const char *core, const char *setting)
 {
@@ -396,9 +421,16 @@ static void *coreaudio_init(const char *device,
 
    fifo_size         = (latency * (*new_rate)) / 1000;
    fifo_size        *= 2 * sizeof(float);
-   dev->buffer_size  = fifo_size;
+   dev->buffer_size = dev->base_buffer_size = fifo_size;
+   dev->network_buffer_size = fifo_size;
+   if (dev->observe_nds)
+   {
+      size_t reserve = ((size_t)(128 * (*new_rate)) / 1000) * 2 * sizeof(float);
+      if (reserve > dev->network_buffer_size)
+         dev->network_buffer_size = reserve;
+   }
 
-   if (!(dev->buffer = fifo_new(fifo_size)))
+   if (!(dev->buffer = fifo_new(dev->network_buffer_size)))
       goto error;
 
    RARCH_LOG("[CoreAudio] Using buffer size of %u bytes: (latency = %u ms).\n",
@@ -431,7 +463,7 @@ static ssize_t coreaudio_write(void *data, const void *buf_, size_t len)
 
       slock_lock(dev->lock);
 
-      write_avail = FIFO_WRITE_AVAIL(dev->buffer);
+      write_avail = coreaudio_writable_locked(dev);
       if (write_avail > len)
          write_avail = len;
 
@@ -527,7 +559,7 @@ static size_t coreaudio_write_avail(void *data)
    coreaudio_t *dev = (coreaudio_t*)data;
 
    slock_lock(dev->lock);
-   avail = FIFO_WRITE_AVAIL(dev->buffer);
+   avail = coreaudio_writable_locked(dev);
    slock_unlock(dev->lock);
 
    return avail;

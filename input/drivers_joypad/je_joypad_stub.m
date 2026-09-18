@@ -15,7 +15,7 @@
 #define JE_MAX_BUTTONS 16
 #define JE_MAX_AXES 4
 
-extern int16_t je_input_state[JE_MAX_PLAYERS][JE_MAX_BUTTONS];
+extern bool joyemu_je_input_button(unsigned player, unsigned button);
 extern int16_t je_analog_state[JE_MAX_PLAYERS][2][2];
 
 static void *je_joypad_init(void *data)
@@ -59,7 +59,7 @@ static int32_t je_joypad_button(unsigned port, uint16_t joykey)
    if (port >= JE_MAX_PLAYERS || joykey >= JE_MAX_BUTTONS || GET_HAT_DIR(joykey))
       return 0;
 
-   return je_input_state[port][joykey] != 0;
+   return joyemu_je_input_button(port, joykey);
 }
 
 static void je_joypad_get_buttons(unsigned port, input_bits_t *state)
@@ -74,7 +74,7 @@ static void je_joypad_get_buttons(unsigned port, input_bits_t *state)
    }
 
    for (i = 0; i < JE_MAX_BUTTONS; i++)
-      if (je_input_state[port][i])
+      if (joyemu_je_input_button(port, i))
          bits |= (1 << i);
 
    BITS_COPY16_PTR(state, bits);
@@ -132,7 +132,7 @@ static int16_t je_joypad_state(
 
       if ((uint16_t)joykey != NO_BTN && !GET_HAT_DIR(joykey) && i < JE_MAX_BUTTONS)
       {
-         if (je_input_state[port_idx][i])
+         if (joyemu_je_input_button(port_idx, i))
             ret |= (1 << i);
       }
       else if (joyaxis != AXIS_NONE &&

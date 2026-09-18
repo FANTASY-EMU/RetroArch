@@ -6523,6 +6523,10 @@ void input_driver_poll(void)
 #endif
 }
 
+#if JOYENGINE_V2
+extern void joyemu_je_input_consume(void);
+#endif
+
 int16_t input_driver_state_wrapper(unsigned port, unsigned device,
       unsigned idx, unsigned id)
 {
@@ -6537,6 +6541,10 @@ int16_t input_driver_state_wrapper(unsigned port, unsigned device,
 
    /* Read input state */
    result = input_state_internal(input_st, settings, port, device, idx, id);
+#if JOYENGINE_V2
+   joyemu_je_input_consume();
+#endif
+
 
    /* Register any analog stick input requests for
     * this 'virtual' (core) port */
