@@ -236,6 +236,12 @@ bool event_load_save_files(bool is_sram_load_disabled);
 bool event_save_files(bool sram_used, bool compress_files,
       const char *path_cheat_database);
 
+#ifdef JOYENGINE_V2
+/* Checked, atomic-per-file Host SRAM write; caller excludes all memory/writer
+ * activity. Does not claim to flush a core's private save implementation. */
+bool joyemu_flush_save_files(bool compress_files, int *error_code);
+#endif
+
 void path_init_savefile_rtc(const char *savefile_path);
 
 void *savefile_ptr_get(void);

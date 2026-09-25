@@ -41,6 +41,10 @@ bool autosave_init(bool compress_files, unsigned autosave_interval);
 
 void autosave_deinit(void);
 
+/* Main-runloop file transactions: join writers without discarding dirty RAM. */
+void autosave_suspend(void);
+void autosave_resume(void);
+
 RETRO_END_DECLS
 
 #endif

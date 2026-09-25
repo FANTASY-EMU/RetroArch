@@ -18,6 +18,11 @@
 #include <sys/types.h>
 #include <string.h>
 #include <time.h>
+#ifdef JOYENGINE_V2
+#include <errno.h>
+#include <stdio.h>
+#include <unistd.h>
+#endif
 
 #include <lists/string_list.h>
 #include <streams/interface_stream.h>
@@ -97,6 +102,19 @@ static void autosave_thread(void *data)
    for (;;)
    {
       bool differ;
+      bool compress_files;
+
+      /* A stop signal may wake the interval wait. Do not start another write
+       * on that wake-up; callers join any write already in progress before
+       * touching the save files. Normal exit saves explicitly after joining. */
+      slock_lock(save->cond_lock);
+      if (save->flags & AUTOSAVE_FLAG_QUIT)
+      {
+         slock_unlock(save->cond_lock);
+         break;
+      }
+      compress_files = (save->flags & AUTOSAVE_FLAG_COMPRESS_FILES) != 0;
+      slock_unlock(save->cond_lock);
 
       slock_lock(save->lock);
       differ = memcmp(save->buffer, save->retro_buffer,
@@ -110,7 +128,7 @@ static void autosave_thread(void *data)
          intfstream_t *file = NULL;
 
          /* Should probably deal with this more elegantly. */
-         if (save->flags & AUTOSAVE_FLAG_COMPRESS_FILES)
+         if (compress_files)
             file = intfstream_open_rzip_file(save->path,
                   RETRO_VFS_FILE_ACCESS_WRITE);
          else
@@ -195,18 +213,26 @@ static autosave_t *autosave_new(const char *path,
 }
 
 /**
- * autosave_free:
+ * autosave_stop_thread:
  * @handle          : pointer to autosave object
  *
- * Frees autosave object.
+ * Join the writer, keeping its comparison buffer and synchronization objects.
  **/
-static void autosave_free(autosave_t *handle)
+static void autosave_stop_thread(autosave_t *handle)
 {
+   if (!handle->thread)
+      return;
    slock_lock(handle->cond_lock);
    handle->flags |= AUTOSAVE_FLAG_QUIT;
    slock_unlock(handle->cond_lock);
    scond_signal(handle->cond);
    sthread_join(handle->thread);
+   handle->thread = NULL;
+}
+
+static void autosave_free(autosave_t *handle)
+{
+   autosave_stop_thread(handle);
 
    slock_free(handle->lock);
    slock_free(handle->cond_lock);
@@ -261,6 +287,31 @@ bool autosave_init(bool compress_files, unsigned autosave_interval)
    }
 
    return true;
+}
+
+/* The main runloop owns these boundaries. Keep the comparison buffer across
+ * file transactions so a failed snapshot cannot mark unsaved RAM as clean. */
+void autosave_suspend(void)
+{
+   unsigned i;
+   for (i = 0; i < autosave_state.num; i++)
+      if (autosave_state.list[i])
+         autosave_stop_thread(autosave_state.list[i]);
+}
+
+void autosave_resume(void)
+{
+   unsigned i;
+   for (i = 0; i < autosave_state.num; i++)
+   {
+      autosave_t *handle = autosave_state.list[i];
+      if (!handle || handle->thread)
+         continue;
+      slock_lock(handle->cond_lock);
+      handle->flags &= ~AUTOSAVE_FLAG_QUIT;
+      slock_unlock(handle->cond_lock);
+      handle->thread = sthread_create(autosave_thread, handle);
+   }
 }
 
 void autosave_deinit(void)
@@ -509,6 +560,103 @@ bool event_save_files(bool is_sram_used, bool compress_files,
    return true;
 }
 
+#ifdef JOYENGINE_V2
+/* The ordinary save command is best-effort and discards per-file failures.
+ * A Host backup transaction needs an acknowledged write before it snapshots
+ * SRAM. Publish each file only after its complete stream has been closed, so a
+ * short write or full disk cannot truncate the previous good save. Callers must
+ * exclude retro_run and join the autosave writer for the entire transaction.
+ * This covers libretro memory only, not a core's private filesystem writers. */
+static bool joyemu_write_save_memory(const struct ram_type *ram,
+      const retro_ctx_memory_info_t *memory, bool compress, int *error_code)
+{
+   int close_result;
+   int failure = 0;
+   int descriptor;
+   bool success = false;
+   intfstream_t *stream = NULL;
+   size_t path_length = strlen(ram->path);
+   char *temporary = (char*)malloc(path_length + sizeof(".joy-save-XXXXXX"));
+   if (!temporary)
+   {
+      *error_code = ENOMEM;
+      return false;
+   }
+   memcpy(temporary, ram->path, path_length);
+   memcpy(temporary + path_length, ".joy-save-XXXXXX", sizeof(".joy-save-XXXXXX"));
+   descriptor = mkstemp(temporary);
+   if (descriptor == -1)
+      goto fail;
+   if (close(descriptor) != 0)
+      goto fail;
+   errno = 0;
+#if defined(HAVE_ZLIB)
+   if (compress)
+      stream = intfstream_open_rzip_file(temporary, RETRO_VFS_FILE_ACCESS_WRITE);
+   else
+#endif
+      stream = intfstream_open_file(temporary, RETRO_VFS_FILE_ACCESS_WRITE,
+            RETRO_VFS_FILE_ACCESS_HINT_NONE);
+   if (!stream)
+      goto fail;
+   errno = 0;
+   success = intfstream_write(stream, memory->data, memory->size) == (int64_t)memory->size;
+   if (success)
+      success = intfstream_flush(stream) == 0;
+   if (!success)
+      failure = errno;
+   errno = 0;
+   close_result = intfstream_close(stream);
+   free(stream);
+   stream = NULL;
+   if (close_result != 0)
+   {
+      if (success)
+         failure = errno;
+      success = false;
+   }
+   if (!success)
+      goto cleanup;
+   errno = 0;
+   if (rename(temporary, ram->path) != 0)
+      goto fail;
+   free(temporary);
+   return true;
+
+fail:
+   failure = errno;
+cleanup:
+   unlink(temporary);
+   free(temporary);
+   *error_code = failure;
+   return false;
+}
+
+bool joyemu_flush_save_files(bool compress_files, int *error_code)
+{
+   unsigned i;
+   *error_code = 0;
+   if (!task_save_files)
+      return true;
+   for (i = 0; i < task_save_files->size; i++)
+   {
+      struct ram_type ram;
+      retro_ctx_memory_info_t memory;
+      /* Missing optional memory (typically RTC) is not an I/O failure. */
+      if (!content_get_memory(&memory, &ram, i))
+         continue;
+      if (string_is_empty(ram.path))
+      {
+         *error_code = EINVAL;
+         return false;
+      }
+      if (!joyemu_write_save_memory(&ram, &memory, compress_files, error_code))
+         return false;
+   }
+   return true;
+}
+#endif
+
 bool event_load_save_files(bool is_sram_load_disabled)
 {
    unsigned i;
@@ -558,4 +706,3 @@ void *savefile_ptr_get(void)
 {
    return task_save_files;
 }
-

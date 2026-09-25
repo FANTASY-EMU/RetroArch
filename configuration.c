@@ -3279,17 +3279,6 @@ void config_set_defaults(void *data)
       configuration_set_string(settings,
             settings->paths.directory_menu_config,
             g_defaults.dirs[DEFAULT_DIR_MENU_CONFIG]);
-#if TARGET_OS_IPHONE
-      {
-         char config_file_path[PATH_MAX_LENGTH];
-         fill_pathname_join_special(config_file_path,
-               settings->paths.directory_menu_config,
-               FILE_PATH_MAIN_CONFIG,
-               sizeof(config_file_path));
-         path_set(RARCH_PATH_CONFIG,
-               config_file_path);
-      }
-#endif
    }
 
    if (!string_is_empty(g_defaults.dirs[DEFAULT_DIR_MENU_CONTENT]))
@@ -3330,16 +3319,32 @@ void config_set_defaults(void *data)
             g_defaults.dirs[DEFAULT_DIR_RECORD_CONFIG],
             sizeof(recording_st->config_dir));
 
-   if (!string_is_empty(g_defaults.path_config))
+   /* Command-line config paths are set before config_set_defaults().
+    * Platform defaults must only supply a path when none was selected. */
+   if (path_is_empty(RARCH_PATH_CONFIG))
    {
-      char temp_str[PATH_MAX_LENGTH];
+      if (!string_is_empty(g_defaults.path_config))
+      {
+         char temp_str[PATH_MAX_LENGTH];
 
-      temp_str[0] = '\0';
+         temp_str[0] = '\0';
 
-      fill_pathname_expand_special(temp_str,
-            g_defaults.path_config,
-            sizeof(temp_str));
-      path_set(RARCH_PATH_CONFIG, temp_str);
+         fill_pathname_expand_special(temp_str,
+               g_defaults.path_config,
+               sizeof(temp_str));
+         path_set(RARCH_PATH_CONFIG, temp_str);
+      }
+#if defined(HAVE_MENU) && TARGET_OS_IPHONE
+      else if (!string_is_empty(g_defaults.dirs[DEFAULT_DIR_MENU_CONFIG]))
+      {
+         char config_file_path[PATH_MAX_LENGTH];
+         fill_pathname_join_special(config_file_path,
+               settings->paths.directory_menu_config,
+               FILE_PATH_MAIN_CONFIG,
+               sizeof(config_file_path));
+         path_set(RARCH_PATH_CONFIG, config_file_path);
+      }
+#endif
    }
 
    /* Built-in playlist default paths,
@@ -3776,6 +3781,12 @@ static void check_verbosity_settings(config_file_t *conf,
  * Loads a config file and reads all the values into memory.
  *
  */
+#if JOYENGINE_V2
+/* Preserve the embedding frontend's persistence contract across user overrides. */
+extern config_file_t *je_adapter_capture_config_policy(config_file_t *base);
+extern bool je_adapter_restore_config_policy(config_file_t *conf, config_file_t *policy);
+#endif
+
 static bool config_load_file(global_t *global,
       const char *path, settings_t *settings)
 {
@@ -3810,6 +3821,9 @@ static bool config_load_file(global_t *global,
    struct config_array_setting *array_settings     = NULL;
    struct config_path_setting *path_settings       = NULL;
    config_file_t *conf                             = NULL;
+#if JOYENGINE_V2
+   config_file_t *frontend_policy                  = NULL;
+#endif
    uint32_t rarch_flags                            = retroarch_get_flags();
 
    tmp_str[0]                                      = '\0';
@@ -3844,13 +3858,14 @@ static bool config_load_file(global_t *global,
       return false;
    }
 
-   bool_settings    = populate_settings_bool  (settings, &bool_settings_size);
-   float_settings   = populate_settings_float (settings, &float_settings_size);
-   int_settings     = populate_settings_int   (settings, &int_settings_size);
-   uint_settings    = populate_settings_uint  (settings, &uint_settings_size);
-   size_settings    = populate_settings_size  (settings, &size_settings_size);
-   array_settings   = populate_settings_array (settings, &array_settings_size);
-   path_settings    = populate_settings_path  (settings, &path_settings_size);
+#if JOYENGINE_V2
+   frontend_policy = je_adapter_capture_config_policy(conf);
+   if (!frontend_policy)
+   {
+      config_file_free(conf);
+      return false;
+   }
+#endif
 
    /* Initialize verbosity settings */
    check_verbosity_settings(conf, settings);
@@ -3927,6 +3942,26 @@ static bool config_load_file(global_t *global,
          retroarch_override_setting_set(RARCH_OVERRIDE_SETTING_OVERLAY_PRESET, NULL);
 #endif
    }
+
+#if JOYENGINE_V2
+   /* Restore before any option/path is consumed, including during core init.
+    * Reapplying settings after rarch_main() would be too late for save paths. */
+   if (!je_adapter_restore_config_policy(conf, frontend_policy))
+   {
+      config_file_free(frontend_policy);
+      config_file_free(conf);
+      return false;
+   }
+   config_file_free(frontend_policy);
+#endif
+
+   bool_settings    = populate_settings_bool  (settings, &bool_settings_size);
+   float_settings   = populate_settings_float (settings, &float_settings_size);
+   int_settings     = populate_settings_int   (settings, &int_settings_size);
+   uint_settings    = populate_settings_uint  (settings, &uint_settings_size);
+   size_settings    = populate_settings_size  (settings, &size_settings_size);
+   array_settings   = populate_settings_array (settings, &array_settings_size);
+   path_settings    = populate_settings_path  (settings, &path_settings_size);
 
    /* Special case for perfcnt_enable */
    {

@@ -19,6 +19,7 @@
 #include <sys/types.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 
 #include <compat/strl.h>
 #include <lists/string_list.h>
@@ -74,16 +75,72 @@
 #define RASTATE_REPLAY_BLOCK "RPLY"
 #define RASTATE_END_BLOCK "END "
 
+/* Stable values mirrored by JEStateLoadFailureReason in JERuntime.h. */
+enum joyemu_state_load_failure_reason
+{
+   JOYEMU_STATE_LOAD_FAILURE_NONE = 0,
+   JOYEMU_STATE_LOAD_FAILURE_EMPTY_INPUT = 1,
+   JOYEMU_STATE_LOAD_FAILURE_FILE_NOT_FOUND = 2,
+   JOYEMU_STATE_LOAD_FAILURE_FILE_UNREADABLE = 3,
+   JOYEMU_STATE_LOAD_FAILURE_INVALID_CONTAINER = 4,
+   JOYEMU_STATE_LOAD_FAILURE_UNSUPPORTED_CONTAINER_VERSION = 5,
+   JOYEMU_STATE_LOAD_FAILURE_CORE_REJECTED = 6,
+   JOYEMU_STATE_LOAD_FAILURE_CORE_UNSUPPORTED = 7,
+   JOYEMU_STATE_LOAD_FAILURE_QUEUE_REJECTED = 8,
+   JOYEMU_STATE_LOAD_FAILURE_UNKNOWN = 9
+};
+
 static volatile int g_joyemu_last_load_state_result = -1;
+static volatile bool g_joyemu_last_load_state_touched_core = false;
+static volatile int g_joyemu_last_load_state_failure_reason = JOYEMU_STATE_LOAD_FAILURE_NONE;
+static volatile int g_joyemu_last_load_state_file_errno = 0;
 
 int joyemu_content_last_load_state_result(void)
 {
    return g_joyemu_last_load_state_result;
 }
 
+bool joyemu_content_last_load_state_touched_core(void)
+{
+   return g_joyemu_last_load_state_touched_core;
+}
+
+int joyemu_content_last_load_state_failure_reason(void)
+{
+   return g_joyemu_last_load_state_failure_reason;
+}
+
+int joyemu_content_last_load_state_file_errno(void)
+{
+   return g_joyemu_last_load_state_file_errno;
+}
+
+static bool joyemu_state_load_failed(enum joyemu_state_load_failure_reason reason,
+      int file_errno)
+{
+   g_joyemu_last_load_state_failure_reason = reason;
+   g_joyemu_last_load_state_file_errno = file_errno;
+   return false;
+}
+
+static void joyemu_state_load_io_failed(int file_errno)
+{
+   enum joyemu_state_load_failure_reason reason = JOYEMU_STATE_LOAD_FAILURE_UNKNOWN;
+   if (file_errno == ENOENT || file_errno == ENOTDIR)
+      reason = JOYEMU_STATE_LOAD_FAILURE_FILE_NOT_FOUND;
+   else if (file_errno && file_errno != ENOMEM)
+      reason = JOYEMU_STATE_LOAD_FAILURE_FILE_UNREADABLE;
+   /* A failed RZIP open/read without errno may be a decoder or allocation
+    * failure. Do not invent a filesystem or compatibility diagnosis. */
+   joyemu_state_load_failed(reason, file_errno);
+}
+
 void joyemu_content_reset_load_state_result(void)
 {
    g_joyemu_last_load_state_result = -1;
+   g_joyemu_last_load_state_touched_core = false;
+   g_joyemu_last_load_state_failure_reason = JOYEMU_STATE_LOAD_FAILURE_NONE;
+   g_joyemu_last_load_state_file_errno = 0;
 }
 
 /* EXT MAGIC header bytes written by ext_bridge_serialize on every modern
@@ -746,6 +803,7 @@ static void task_load_handler(retro_task_t *task)
 
    if (!state->file)
    {
+      errno = 0;
 #if defined(HAVE_ZLIB)
       /* Always use RZIP interface when reading state
        * files - this will automatically handle uncompressed
@@ -760,11 +818,18 @@ static void task_load_handler(retro_task_t *task)
          goto not_found;
 #endif
 
+      errno = 0;
       if ((state->size = intfstream_get_size(state->file)) < 0)
+      {
+         joyemu_state_load_io_failed(errno);
          goto end;
+      }
 
       if (!(state->data = malloc(state->size + 1)))
+      {
+         joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_UNKNOWN, 0);
          goto end;
+      }
    }
 
 #ifdef HAVE_CHEEVOS
@@ -773,8 +838,11 @@ static void task_load_handler(retro_task_t *task)
 #endif
 
    remaining          = MIN(state->size - state->bytes_read, SAVE_STATE_CHUNK);
+   errno = 0;
    bytes_read         = intfstream_read(state->file,
          (uint8_t*)state->data + state->bytes_read, remaining);
+   if (bytes_read != remaining)
+      joyemu_state_load_io_failed(errno);
    state->bytes_read += bytes_read;
 
    if (state->size > 0)
@@ -836,6 +904,7 @@ static void task_load_handler(retro_task_t *task)
 not_found:
    {
       char msg[128];
+      joyemu_state_load_io_failed(errno);
       snprintf(msg, sizeof(msg), "%s \"%s\".",
             msg_hash_to_str(MSG_FAILED_TO_LOAD_STATE),
             path_basename(state->path));
@@ -850,6 +919,7 @@ static bool content_load_rastate1(unsigned char* input, size_t len, bool strip_a
 {
    unsigned char *stop = input + len;
    bool seen_core      = false;
+   bool seen_end       = false;
 #ifdef HAVE_CHEEVOS
    bool seen_cheevos   = false;
 #endif
@@ -857,19 +927,30 @@ static bool content_load_rastate1(unsigned char* input, size_t len, bool strip_a
    bool seen_replay = false;
 #endif
 
+   if (len < 8)
+      return joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_INVALID_CONTAINER, 0);
    input += 8;
 
    while (input < stop)
    {
-      size_t     block_size = ( input[7] << 24
-            | input[6] << 16 |  input[5] << 8 | input[4]);
+      size_t block_size, padding, remaining;
       unsigned char *marker = input;
 
+      if ((size_t)(stop - input) < 8)
+         return joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_INVALID_CONTAINER, 0);
+      block_size = ((size_t)input[7] << 24
+            | (size_t)input[6] << 16 | (size_t)input[5] << 8 | input[4]);
       input += 8;
+      remaining = (size_t)(stop - input);
+      padding   = (8 - (block_size & 7)) & 7;
+      if (block_size > remaining || padding > remaining - block_size)
+         return joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_INVALID_CONTAINER, 0);
 
       if (memcmp(marker, RASTATE_MEM_BLOCK, 4) == 0)
       {
          retro_ctx_serialize_info_t serial_info;
+         if (!block_size)
+            return joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_INVALID_CONTAINER, 0);
          serial_info.data_const = (void*)input;
          serial_info.size       = block_size;
 
@@ -917,8 +998,10 @@ static bool content_load_rastate1(unsigned char* input, size_t len, bool strip_a
             }
          }
 #endif
+         /* A core may partially mutate RAM before rejecting the state. */
+         g_joyemu_last_load_state_touched_core = true;
          if (!core_unserialize(&serial_info))
-            return false;
+            return joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_CORE_REJECTED, 0);
 
          seen_core = true;
       }
@@ -944,15 +1027,22 @@ static bool content_load_rastate1(unsigned char* input, size_t len, bool strip_a
       }
 #endif
       else if (memcmp(marker, RASTATE_END_BLOCK, 4) == 0)
+      {
+         if (block_size)
+            return joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_INVALID_CONTAINER, 0);
+         seen_end = true;
          break;
+      }
 
-      input += CONTENT_ALIGN_SIZE(block_size);
+      input += block_size + padding;
    }
 
+   if (!seen_end)
+      return joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_INVALID_CONTAINER, 0);
    if (!seen_core)
    {
       RARCH_LOG("[State] No core.\n");
-      return false;
+      return joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_INVALID_CONTAINER, 0);
    }
 
 #ifdef HAVE_CHEEVOS
@@ -977,14 +1067,17 @@ static bool content_load_rastate1(unsigned char* input, size_t len, bool strip_a
 static bool content_deserialize_state_with_options(
       const void *s, size_t len, bool strip_arcade_legacy_prefix)
 {
-   if (memcmp(s, "RASTATE", 7) != 0)
+   if (!s || !len)
+      return joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_EMPTY_INPUT, 0);
+   if (len < 7 || memcmp(s, "RASTATE", 7) != 0)
    {
       /* old format is just core data, load it directly */
       retro_ctx_serialize_info_t serial_info;
       serial_info.data_const = s;
       serial_info.size       = len;
+      g_joyemu_last_load_state_touched_core = true;
       if (!core_unserialize(&serial_info))
-         return false;
+         return joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_CORE_REJECTED, 0);
 #ifdef HAVE_CHEEVOS
       rcheevos_set_serialized_data(NULL);
 #endif
@@ -1003,14 +1096,16 @@ static bool content_deserialize_state_with_options(
    else
    {
       unsigned char* input = (unsigned char*)s;
+      if (len < 8)
+         return joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_INVALID_CONTAINER, 0);
       switch (input[7]) /* version */
       {
          case 1:
             if (content_load_rastate1(input, len, strip_arcade_legacy_prefix))
                break;
-            /* fall-through intentional */
-         default:
             return false;
+         default:
+            return joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_UNSUPPORTED_CONTAINER_VERSION, 0);
       }
    }
    return true;
@@ -1034,11 +1129,19 @@ static void content_load_state_cb(retro_task_t *task,
    unsigned i;
    bool ret;
    load_task_data_t *load_data = (load_task_data_t*)task_data;
-   ssize_t _len                = load_data->size;
+   ssize_t _len                = load_data ? load_data->size : -1;
    unsigned num_blocks         = 0;
-   void *buf                   = load_data->data;
+   void *buf                   = load_data ? load_data->data : NULL;
    struct sram_block *blocks   = NULL;
    struct string_list *savefile_list = (struct string_list*)savefile_ptr_get();
+
+   if (!load_data)
+   {
+      g_joyemu_last_load_state_result = 0;
+      if (g_joyemu_last_load_state_failure_reason == JOYEMU_STATE_LOAD_FAILURE_NONE)
+         joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_UNKNOWN, 0);
+      return;
+   }
 
 #ifdef HAVE_CHEEVOS
    if (rcheevos_hardcore_active())
@@ -1051,7 +1154,7 @@ static void content_load_state_cb(retro_task_t *task,
          (unsigned)_len,
          msg_hash_to_str(MSG_BYTES));
 
-   if (_len < 0 || !buf)
+   if (error || _len < 0 || !buf)
       goto error;
 
    /* This means we're backing up the file in memory,
@@ -1157,6 +1260,8 @@ static void content_load_state_cb(retro_task_t *task,
       goto error;
 
    g_joyemu_last_load_state_result = 1;
+   g_joyemu_last_load_state_failure_reason = JOYEMU_STATE_LOAD_FAILURE_NONE;
+   g_joyemu_last_load_state_file_errno = 0;
 
    free(buf);
    free(load_data);
@@ -1165,6 +1270,8 @@ static void content_load_state_cb(retro_task_t *task,
 
 error:
    g_joyemu_last_load_state_result = 0;
+   if (g_joyemu_last_load_state_failure_reason == JOYEMU_STATE_LOAD_FAILURE_NONE)
+      joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_UNKNOWN, 0);
    RARCH_ERR("[State] %s \"%s\".\n",
          msg_hash_to_str(MSG_FAILED_TO_LOAD_STATE),
          load_data->path);
@@ -1619,8 +1726,17 @@ static bool content_load_state_internal(const char *path,
    video_driver_state_t *video_st  = video_state_get_ptr();
    settings_t *settings            = config_get_ptr();
 
+   joyemu_content_reset_load_state_result();
+
+   if (!path || !*path)
+   {
+      joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_EMPTY_INPUT, 0);
+      goto error;
+   }
+
    if (!core_info_current_supports_savestate())
    {
+      joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_CORE_UNSUPPORTED, 0);
       RARCH_LOG("[State] %s\n",
             msg_hash_to_str(MSG_CORE_DOES_NOT_SUPPORT_SAVESTATES));
       goto error;
@@ -1659,16 +1775,26 @@ static bool content_load_state_internal(const char *path,
    else
       task->flags               &= ~RETRO_TASK_FLG_MUTE;
 
-   g_joyemu_last_load_state_result = -1;
-   task_queue_push(task);
+   if (!task_queue_push(task))
+   {
+      joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_QUEUE_REJECTED, 0);
+      goto error;
+   }
 
    return true;
 
 error:
+   g_joyemu_last_load_state_result = 0;
+   if (g_joyemu_last_load_state_failure_reason == JOYEMU_STATE_LOAD_FAILURE_NONE)
+      joyemu_state_load_failed(JOYEMU_STATE_LOAD_FAILURE_UNKNOWN, 0);
    if (state)
       free(state);
    if (task)
+   {
+      if (task->title)
+         task_free_title(task);
       free(task);
+   }
 
    return false;
 }
