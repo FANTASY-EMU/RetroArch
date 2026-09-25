@@ -75,4 +75,10 @@ static inline void joyemu_cadence_trace_record_vulkan_readback_missing_image(
 
 #endif
 
+#if defined(__APPLE__)
+void joyemu_dc_cheats_apply(void);
+#else
+static inline void joyemu_dc_cheats_apply(void) {}
+#endif
+
 #endif

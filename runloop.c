@@ -8471,6 +8471,7 @@ void core_run(void)
       joyemu_cadence_trace_token_t core_run_trace =
          joyemu_cadence_trace_begin(JOYEMU_CADENCE_TRACE_CORE_RUN);
       current_core->retro_run();
+      joyemu_dc_cheats_apply();
       joyemu_cadence_trace_end(JOYEMU_CADENCE_TRACE_CORE_RUN, core_run_trace);
    }
 
