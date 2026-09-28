@@ -458,6 +458,38 @@ static bool state_manager_pop(state_manager_t *state, const void **data)
    return true;
 }
 
+#if JOYENGINE_V2
+/* 倍率以客体时间计：G 帧一份快照时，每 tick 累加 speed/G。
+ * 首次按下立即出栈，其余 tick 只呈现缓存画面，不重复运行核心。 */
+static unsigned joyemu_rewind_tick_steps(unsigned *phase, unsigned speed,
+      unsigned granularity, bool first)
+{
+   unsigned steps;
+   if (granularity < 1) granularity = 1;
+   if (speed < 1) speed = 1;
+   if (speed > 5) speed = 5;
+   if (first) *phase = granularity - 1;
+   *phase += speed;
+   steps = *phase / granularity;
+   *phase %= granularity;
+   return steps;
+}
+
+/* 每次呈现最多消费五份历史，只对最终状态调用核心反序列化。 */
+static bool joyemu_state_manager_pop_steps(state_manager_t *state,
+      const void **data, unsigned steps)
+{
+   unsigned i;
+   bool popped = state_manager_pop(state, data);
+   if (steps < 1) steps = 1;
+   if (steps > 5) steps = 5;
+   for (i = 1; popped && i < steps; i++)
+      if (!state_manager_pop(state, data))
+         break;
+   return popped;
+}
+#endif
+
 static void state_manager_push_where(state_manager_t *state, void **data)
 {
    /* We need to ensure we have an uncompressed copy of the last
@@ -553,6 +585,10 @@ void state_manager_event_init(
        || rewind_st->state)
       return;
 
+#if JOYENGINE_V2
+   rewind_st->record_phase = rewind_st->rewind_phase = 0;
+   rewind_st->init_buffer_size = rewind_buffer_size;
+#endif
    rewind_st->size               = 0;
    rewind_st->flags             &= ~(
                                    STATE_MGR_REWIND_ST_FLAG_FRAME_IS_REVERSED
@@ -588,10 +624,25 @@ void state_manager_event_init(
 
    if (!rewind_st->size)
    {
+#if JOYENGINE_V2
+      if (!rewind_st->init_retried) rewind_st->init_wait_frames = 60;
+#endif
       RARCH_ERR("[Rewind] %s.\n",
             msg_hash_to_str(MSG_REWIND_INIT_FAILED));
       return;
    }
+
+#if JOYENGINE_V2
+   /* 留出最坏差分及环绕空间；拒绝异常大状态，不能先申请无界工作缓冲。 */
+   if (rewind_buffer_size <= 3 * sizeof(size_t)
+         || rewind_st->size > rewind_buffer_size / 2
+         || state_manager_raw_maxsize(rewind_st->size)
+               > (rewind_buffer_size - 3 * sizeof(size_t)) / 2)
+   {
+      RARCH_WARN("[Rewind] State exceeds the configured rewind memory budget.\n");
+      return;
+   }
+#endif
 
    RARCH_LOG("[Rewind] %s: %u MB\n",
          msg_hash_to_str(MSG_REWIND_INIT),
@@ -601,12 +652,28 @@ void state_manager_event_init(
          rewind_buffer_size);
 
    if (!rewind_st->state)
+   {
       RARCH_WARN("[Rewind] %s.\n",
             msg_hash_to_str(MSG_REWIND_INIT_FAILED));
+      return;
+   }
 
    state_manager_push_where(rewind_st->state, &state);
 
+#if JOYENGINE_V2
+   if (!content_serialize_state_rewind(state, rewind_st->size))
+   {
+      RARCH_WARN("[Rewind] Initial capture failed; waiting for core startup or disabling rewind.\n");
+      if (!rewind_st->init_retried) rewind_st->init_wait_frames = 60;
+      state_manager_free(rewind_st->state);
+      free(rewind_st->state);
+      rewind_st->state = NULL;
+      rewind_st->size = 0;
+      return;
+   }
+#else
    content_serialize_state_rewind(state, rewind_st->size);
+#endif
 
    state_manager_push_do(rewind_st->state);
 }
@@ -633,11 +700,18 @@ void state_manager_event_deinit(
 
    rewind_st->state  = NULL;
    rewind_st->size   = 0;
+#if JOYENGINE_V2
+   rewind_st->record_phase = rewind_st->rewind_phase = 0;
+   rewind_st->init_wait_frames = rewind_st->init_buffer_size = 0;
+   rewind_st->init_retried = false;
+#endif
    rewind_st->flags &= ~(
                           STATE_MGR_REWIND_ST_FLAG_FRAME_IS_REVERSED
                         | STATE_MGR_REWIND_ST_FLAG_HOTKEY_WAS_CHECKED
                         | STATE_MGR_REWIND_ST_FLAG_HOTKEY_WAS_PRESSED
                         | STATE_MGR_REWIND_ST_FLAG_INIT_ATTEMPTED
+                        | STATE_MGR_REWIND_ST_FLAG_FRAME_IS_HELD
+                        | STATE_MGR_REWIND_ST_FLAG_STATE_WAS_RESTORED
                         );
 
    /* Restore regular (non-rewind) core audio
@@ -666,6 +740,9 @@ bool state_manager_check_rewind(
       char *s, size_t len, unsigned *time)
 {
    bool ret          = false;
+#if JOYENGINE_V2
+   unsigned joyemu_steps = 1;
+#endif
 #ifdef HAVE_NETWORKING
    bool was_reversed = false;
 #endif
@@ -673,6 +750,36 @@ bool state_manager_check_rewind(
    if (    !rewind_st
        || (!(rewind_st->flags & STATE_MGR_REWIND_ST_FLAG_INIT_ATTEMPTED)))
       return false;
+
+#if JOYENGINE_V2
+   /* 某些核心首个 retro_run 前没有状态。只在推进后重试一次，
+    * 不把 unsupported／持续失败变成每帧昂贵的初始化轮询。 */
+   if (!rewind_st->state && !is_paused && rewind_st->init_wait_frames
+         && --rewind_st->init_wait_frames == 0)
+   {
+      unsigned buffer_size = rewind_st->init_buffer_size;
+      rewind_st->init_retried = true;
+      rewind_st->flags &= ~STATE_MGR_REWIND_ST_FLAG_INIT_ATTEMPTED;
+      state_manager_event_init(rewind_st, buffer_size);
+   }
+   rewind_st->flags &= ~(STATE_MGR_REWIND_ST_FLAG_FRAME_IS_HELD
+         | STATE_MGR_REWIND_ST_FLAG_STATE_WAS_RESTORED);
+   if (pressed && rewind_st->state)
+   {
+      extern unsigned joyemu_rewind_steps_requested(void);
+      unsigned steps = is_paused ? 1 : joyemu_rewind_tick_steps(
+            &rewind_st->rewind_phase, joyemu_rewind_steps_requested(),
+            rewind_granularity,
+            !(rewind_st->flags & STATE_MGR_REWIND_ST_FLAG_HOTKEY_WAS_PRESSED));
+      if (!steps)
+      {
+         rewind_st->flags |= STATE_MGR_REWIND_ST_FLAG_FRAME_IS_HELD;
+         return false;
+      }
+      /* 保存本 tick 的步数，以下出栈只消费一次。 */
+      joyemu_steps = steps;
+   }
+#endif
 
    if (!(rewind_st->flags & STATE_MGR_REWIND_ST_FLAG_HOTKEY_WAS_CHECKED))
    {
@@ -712,7 +819,15 @@ bool state_manager_check_rewind(
    {
       const void *buf    = NULL;
 
-      if (state_manager_pop(rewind_st->state, &buf))
+#if JOYENGINE_V2
+      extern void joyemu_rewind_report_progress(bool popped);
+      bool popped = joyemu_state_manager_pop_steps(rewind_st->state, &buf,
+            joyemu_steps);
+      joyemu_rewind_report_progress(popped);
+#else
+      bool popped = state_manager_pop(rewind_st->state, &buf);
+#endif
+      if (popped)
       {
 #ifdef HAVE_NETWORKING
          /* Make sure netplay isn't confused */
@@ -730,7 +845,18 @@ bool state_manager_check_rewind(
          *time                  = is_paused ? 1 : 30;
          ret                    = true;
 
+#if JOYENGINE_V2
+         bool restored = content_deserialize_state(buf, rewind_st->size);
+         if (!(rewind_st->flags & STATE_MGR_REWIND_ST_FLAG_HOTKEY_WAS_PRESSED))
+            RARCH_LOG("[Rewind] First restore: steps=%u granularity=%u restored=%d.\n",
+                  joyemu_steps, rewind_granularity, restored);
+         if (restored)
+            rewind_st->flags |= STATE_MGR_REWIND_ST_FLAG_STATE_WAS_RESTORED;
+         else
+            goto restore_failed;
+#else
          content_deserialize_state(buf, rewind_st->size);
+#endif
 
 #ifdef HAVE_BSV_MOVIE
          bsv_movie_frame_rewind();
@@ -748,7 +874,16 @@ bool state_manager_check_rewind(
          }
          else
 #endif
+#if JOYENGINE_V2
+         {
+            if (content_deserialize_state(buf, rewind_st->size))
+               rewind_st->flags |= STATE_MGR_REWIND_ST_FLAG_STATE_WAS_RESTORED;
+            else
+               goto restore_failed;
+         }
+#else
             content_deserialize_state(buf, rewind_st->size);
+#endif
 
 #ifdef HAVE_NETWORKING
          /* Tell netplay we're done */
@@ -766,7 +901,15 @@ bool state_manager_check_rewind(
    }
    else
    {
+#if JOYENGINE_V2
+      unsigned cnt;
+      if (rewind_st->flags & STATE_MGR_REWIND_ST_FLAG_HOTKEY_WAS_PRESSED)
+         rewind_st->record_phase = 0;
+      rewind_st->rewind_phase = 0;
+      cnt = rewind_st->record_phase;
+#else
       static unsigned cnt      = 0;
+#endif
 
 #ifdef HAVE_NETWORKING
       /* Tell netplay we're done */
@@ -776,6 +919,9 @@ bool state_manager_check_rewind(
 
       cnt = (cnt + 1) % (rewind_granularity ?
             rewind_granularity : 1); /* Avoid possible SIGFPE. */
+#if JOYENGINE_V2
+      rewind_st->record_phase = cnt;
+#endif
 
       if (     !is_paused
             && ((cnt == 0) || retroarch_ctl(RARCH_CTL_BSV_MOVIE_IS_INITED, NULL)))
@@ -783,7 +929,18 @@ bool state_manager_check_rewind(
          void *state = NULL;
          state_manager_push_where(rewind_st->state, &state);
 
+#if JOYENGINE_V2
+         if (!content_serialize_state_rewind(state, rewind_st->size))
+         {
+            /* 失败可能已部分改写 nextblock，丢弃整环，绝不能提交坏快照。 */
+            RARCH_WARN("[Rewind] Capture failed or state grew; disabling rewind for this session.\n");
+            state_manager_event_deinit(rewind_st, current_core);
+            rewind_st->flags |= STATE_MGR_REWIND_ST_FLAG_INIT_ATTEMPTED;
+            return false;
+         }
+#else
          content_serialize_state_rewind(state, rewind_st->size);
+#endif
 
          state_manager_push_do(rewind_st->state);
       }
@@ -812,4 +969,14 @@ bool state_manager_check_rewind(
    else
       rewind_st->flags &= ~STATE_MGR_REWIND_ST_FLAG_HOTKEY_WAS_PRESSED;
    return ret;
+#if JOYENGINE_V2
+restore_failed:
+   /* A rejecting core may already have changed RAM. Do not keep consuming
+    * old history or run a presentation warmup from that rejected snapshot. */
+   RARCH_WARN("[Rewind] Restore failed; discarding history and stopping rewind.\n");
+   state_manager_event_deinit(rewind_st, current_core);
+   rewind_st->flags |= STATE_MGR_REWIND_ST_FLAG_INIT_ATTEMPTED
+         | STATE_MGR_REWIND_ST_FLAG_FRAME_IS_HELD;
+   return false;
+#endif
 }

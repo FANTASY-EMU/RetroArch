@@ -33,7 +33,9 @@ enum state_manager_rewind_st_flags
    STATE_MGR_REWIND_ST_FLAG_FRAME_IS_REVERSED     = (1 << 0),
    STATE_MGR_REWIND_ST_FLAG_INIT_ATTEMPTED        = (1 << 1),
    STATE_MGR_REWIND_ST_FLAG_HOTKEY_WAS_CHECKED    = (1 << 2),
-   STATE_MGR_REWIND_ST_FLAG_HOTKEY_WAS_PRESSED    = (1 << 3)
+   STATE_MGR_REWIND_ST_FLAG_HOTKEY_WAS_PRESSED    = (1 << 3),
+   STATE_MGR_REWIND_ST_FLAG_FRAME_IS_HELD        = (1 << 4),
+   STATE_MGR_REWIND_ST_FLAG_STATE_WAS_RESTORED   = (1 << 5)
 };
 
 struct state_manager
@@ -70,6 +72,13 @@ struct state_manager_rewind_state
    /* Rewind support. */
    state_manager_t *state;
    size_t size;
+#if JOYENGINE_V2
+   unsigned record_phase;
+   unsigned rewind_phase;
+   unsigned init_wait_frames;
+   unsigned init_buffer_size;
+   bool init_retried;
+#endif
    uint8_t flags;
 };
 

@@ -867,6 +867,8 @@ font_renderer_t metal_raster_font = {
    video_info_t _video;
    struct joyemu_nds_native_frame _ndsPendingFrame;
    struct joyemu_nds_native_frame _ndsLastLayout;
+   struct joyemu_nds_native_frame _ndsRewindRetryFrame;
+   uint32_t _ndsRewindRetryPixels[2][256 * 192];
    bool _ndsFramePending;
    bool _ndsPendingPaced;
    bool _ndsPendingLayoutChanged;
@@ -1170,6 +1172,8 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
 
 - (bool)stageNDSFrame:(struct joyemu_nds_native_frame *)frame
 {
+   /* A newer core frame supersedes any older deferred rewind presentation. */
+   memset(&_ndsRewindRetryFrame, 0, sizeof(_ndsRewindRetryFrame));
    _ndsFramePending = false;
    memset(&_ndsPendingFrame, 0, sizeof(_ndsPendingFrame));
    bool fastForward = (runloop_state_get_ptr()->flags & RUNLOOP_FLAG_FASTMOTION) != 0;
@@ -1224,9 +1228,14 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
          (self.requestedNonBlocking || joyemu_je_cooperative_frame_pacing_active())
          && joyemu_metal_nonblocking_frame_acquisition_enabled();
 
-      /* Native pointers are borrowed only through this immediate callback.
-       * Cached hardware-sentinel replay has no pending descriptor. */
+      /* Borrowed core pointers expire after this callback. A failed rewind
+       * presentation owns a pixel copy so cached ticks can retry it. */
       bool nativeFrame = frame == RETRO_HW_FRAME_BUFFER_VALID;
+      bool rewindHeld = false;
+#ifdef HAVE_REWIND
+      rewindHeld = (runloop_state_get_ptr()->rewind_st.flags
+            & STATE_MGR_REWIND_ST_FLAG_HOTKEY_WAS_PRESSED) != 0;
+#endif
       bool pending = nativeFrame && _ndsFramePending
          && width == _ndsPendingFrame.canvas_width
          && height == _ndsPendingFrame.canvas_height;
@@ -1234,11 +1243,33 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
       bool ndsPaced = _ndsPendingPaced;
       bool ndsLayoutChanged = _ndsPendingLayoutChanged;
       uint64_t ndsInterval = _ndsPendingInterval;
+      if (!pending && rewindHeld && (!frame || nativeFrame)
+          && _ndsRewindRetryFrame.top
+          && width == _ndsRewindRetryFrame.canvas_width
+          && height == _ndsRewindRetryFrame.canvas_height)
+      {
+         ndsFrame = _ndsRewindRetryFrame;
+         ndsPaced = false;
+         ndsLayoutChanged = true;
+         pending = true;
+      }
+      memset(&_ndsRewindRetryFrame, 0, sizeof(_ndsRewindRetryFrame));
       _ndsFramePending = false;
       memset(&_ndsPendingFrame, 0, sizeof(_ndsPendingFrame));
       JEFrameBeginResult beginResult = [self _beginFrame];
       if (beginResult != JEFrameBeginResultReady)
+      {
+         if (pending && rewindHeld)
+         {
+            const size_t bytes = sizeof(_ndsRewindRetryPixels[0]);
+            memmove(_ndsRewindRetryPixels[0], ndsFrame.top, bytes);
+            memmove(_ndsRewindRetryPixels[1], ndsFrame.bottom, bytes);
+            _ndsRewindRetryFrame = ndsFrame;
+            _ndsRewindRetryFrame.top = _ndsRewindRetryPixels[0];
+            _ndsRewindRetryFrame.bottom = _ndsRewindRetryPixels[1];
+         }
          return YES;
+      }
 
       _frameView.frameCount = frameCount;
       if (pending)

@@ -5945,6 +5945,15 @@ static enum runloop_state_enum runloop_check_state(
       input_st->flags |= INP_FLAG_BLOCK_HOTKEY;
 
    input_driver_collect_system_input(input_st, settings, &current_bits);
+#if defined(HAVE_REWIND) && JOYENGINE_V2
+   {
+      extern bool joyemu_rewind_hold_requested(void);
+      if (joyemu_rewind_hold_requested())
+         BIT256_SET(current_bits, RARCH_REWIND);
+      else
+         BIT256_CLEAR(current_bits, RARCH_REWIND);
+   }
+#endif
 
 #ifdef HAVE_MENU
    last_input                       = current_bits;
@@ -6773,6 +6782,14 @@ static enum runloop_state_enum runloop_check_state(
          }
 
          old_rewind_pressed = rewind_pressed;
+#if JOYENGINE_V2
+         if (rewind_pressed && (runloop_st->rewind_st.flags
+               & STATE_MGR_REWIND_ST_FLAG_FRAME_IS_HELD))
+         {
+            cbs->poll_cb();
+            return RUNLOOP_STATE_PAUSE;
+         }
+#endif
 
 #if defined(HAVE_GFX_WIDGETS)
          if (widgets_active)
@@ -7470,6 +7487,36 @@ end:
 
 
 
+#if JOYENGINE_V2 && defined(HAVE_REWIND)
+/* 保持 VIDEO_FLAG_ACTIVE：核心必须真正绘制恢复后的预热帧，
+ * 仅拦截它的呈现回调，不能用 runahead 的禁绘制开关代替。 */
+static void joyemu_rewind_discard_video(const void *data,
+      unsigned width, unsigned height, size_t pitch)
+{
+   (void)data; (void)width; (void)height; (void)pitch;
+}
+
+static void joyemu_rewind_prepare_presentation(runloop_state_t *runloop_st,
+      audio_driver_state_t *audio_st)
+{
+   extern bool joyemu_rewind_needs_video_warmup(void);
+   struct retro_core_t *core = &runloop_st->current_core;
+   bool audio_was_suspended;
+   if (!(runloop_st->rewind_st.flags & STATE_MGR_REWIND_ST_FLAG_STATE_WAS_RESTORED))
+      return;
+   runloop_st->rewind_st.flags &= ~STATE_MGR_REWIND_ST_FLAG_STATE_WAS_RESTORED;
+   if (!joyemu_rewind_needs_video_warmup() || !core->retro_set_video_refresh)
+      return;
+   audio_was_suspended = (audio_st->flags & AUDIO_FLAG_SUSPENDED) != 0;
+   core->retro_set_video_refresh(joyemu_rewind_discard_video);
+   audio_st->flags |= AUDIO_FLAG_SUSPENDED;
+   core_run();
+   core->retro_set_video_refresh(runloop_st->retro_ctx.frame_cb);
+   if (!audio_was_suspended)
+      audio_st->flags &= ~AUDIO_FLAG_SUSPENDED;
+}
+#endif
+
 /**
  * runloop_iterate:
  *
@@ -7689,6 +7736,10 @@ int runloop_iterate(void)
       camera_st->driver->poll(camera_st->data,
             camera_st->cb.frame_raw_framebuffer,
             camera_st->cb.frame_opengl_texture);
+
+#if JOYENGINE_V2 && defined(HAVE_REWIND)
+   joyemu_rewind_prepare_presentation(runloop_st, audio_st);
+#endif
 
    /* Measure the time between core_run() and video_driver_frame() */
    runloop_st->core_run_time = cpu_features_get_time_usec();
