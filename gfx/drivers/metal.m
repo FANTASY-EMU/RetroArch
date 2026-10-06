@@ -38,6 +38,32 @@
 #include <features/features_cpu.h>
 #include "joyemu_nds_video.h"
 #include "joyemu_nds_compute.h"
+#include <os/lock.h>
+
+static os_unfair_lock joyemu_screen_rotation_lock = OS_UNFAIR_LOCK_INIT;
+static struct joyemu_screen_rotation joyemu_screen_rotation_state;
+static bool joyemu_screen_rotation_active;
+
+void joyemu_metal_set_screen_rotation(const struct joyemu_screen_rotation *rotation)
+{
+   os_unfair_lock_lock(&joyemu_screen_rotation_lock);
+   joyemu_screen_rotation_active = rotation
+      && (fabsf(rotation->degrees[0]) > 0.01f || fabsf(rotation->degrees[1]) > 0.01f);
+   if (joyemu_screen_rotation_active)
+      joyemu_screen_rotation_state = *rotation;
+   os_unfair_lock_unlock(&joyemu_screen_rotation_lock);
+}
+
+static bool joyemu_screen_rotation_snapshot(struct joyemu_screen_rotation *out)
+{
+   bool active;
+   os_unfair_lock_lock(&joyemu_screen_rotation_lock);
+   active = joyemu_screen_rotation_active;
+   if (active)
+      *out = joyemu_screen_rotation_state;
+   os_unfair_lock_unlock(&joyemu_screen_rotation_lock);
+   return active;
+}
 
 #ifdef HAVE_CONFIG_H
 #include "../../config.h"
@@ -1920,6 +1946,9 @@ static NSString *je_metal_draw_state_name(NSUInteger drawState)
 
    return res;
 }
+   id<MTLComputePipelineState> _rotatePipeline;
+   id<MTLTexture> _rotateCanvas;
+   bool _rotateDisabled;
 
 - (void)_prepareFrame
 {
@@ -2354,6 +2383,94 @@ unavailable:
    }
 
    free(shader);
+/* Exact values on right angles: cosf(M_PI / 2) is not 0, which would shift sample points
+ * onto pixel edges and duplicate or skip a column. */
+static void joyemu_rotation_cos_sin(float degrees, float *c, float *s)
+{
+   float quarter = degrees / 90.0f;
+   if (fabsf(quarter - roundf(quarter)) < 1e-4f)
+   {
+      int q = ((int)roundf(quarter) % 4 + 4) % 4;
+      static const float table[4][2] = { { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 } };
+      *c = table[q][0];
+      *s = table[q][1];
+      return;
+   }
+   *c = cosf(degrees * (float)M_PI / 180.0f);
+   *s = sinf(degrees * (float)M_PI / 180.0f);
+}
+
+/* Turns each host-rotated screen inside the composed frame, whatever composed it
+ * (native NDS compose or a core's software framebuffer). `inPlace` writes the result back
+ * into the frame texture, which slang shader passes sample directly. */
+- (void)_applyJoyemuScreenRotation:(Context *)ctx inPlace:(BOOL)inPlace
+{
+   struct joyemu_screen_rotation rotation;
+   id<MTLTexture> source = _texture;
+   if (!joyemu_screen_rotation_snapshot(&rotation))
+   {
+      _rotateCanvas = nil;
+      return;
+   }
+   if (_rotateDisabled || !source
+       || source.width != rotation.canvas_width || source.height != rotation.canvas_height
+       || (inPlace && source.pixelFormat != MTLPixelFormatBGRA8Unorm))
+      return;
+   if (!_rotatePipeline)
+   {
+      NSError *error = nil;
+      id<MTLLibrary> library = [ctx.device newLibraryWithSource:
+            [NSString stringWithUTF8String:joyemu_screen_rotate_source] options:nil error:&error];
+      id<MTLFunction> function = [library newFunctionWithName:@"joyemu_screen_rotate"];
+      if (function)
+         _rotatePipeline = [ctx.device newComputePipelineStateWithFunction:function error:&error];
+      if (!_rotatePipeline)
+      {
+         _rotateDisabled = true;
+         RARCH_WARN("[Metal] Screen rotation unavailable: %s.\n", error.localizedDescription.UTF8String);
+         return;
+      }
+   }
+   if (!_rotateCanvas || _rotateCanvas.width != source.width || _rotateCanvas.height != source.height)
+   {
+      MTLTextureDescriptor *td = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+            width:source.width height:source.height mipmapped:NO];
+      td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+      td.storageMode = MTLStorageModePrivate;
+      _rotateCanvas = [ctx.device newTextureWithDescriptor:td];
+      if (!_rotateCanvas)
+         return;
+   }
+   id<MTLCommandBuffer> cb = ctx.blitCommandBuffer;
+   id<MTLComputeCommandEncoder> encoder = [cb computeCommandEncoder];
+   if (!encoder)
+      return;
+   struct joyemu_screen_rotate_params params;
+   for (int i = 0; i < 2; i++)
+   {
+      memcpy(params.rect[i], &rotation.rect[i], sizeof(params.rect[i]));
+      joyemu_rotation_cos_sin(rotation.degrees[i], &params.cos_sin[i][0], &params.cos_sin[i][1]);
+      params.cos_sin[i][2] = 0.0f;
+      params.cos_sin[i][3] = 0.0f;
+   }
+   [encoder setComputePipelineState:_rotatePipeline];
+   [encoder setTexture:source atIndex:0];
+   [encoder setTexture:_rotateCanvas atIndex:1];
+   [encoder setBytes:&params length:sizeof(params) atIndex:0];
+   [encoder dispatchThreadgroups:MTLSizeMake((source.width + 15) / 16, (source.height + 15) / 16, 1)
+          threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+   [encoder endEncoding];
+   if (!inPlace)
+   {
+      _texture = _rotateCanvas;
+      return;
+   }
+   id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+   [blit copyFromTexture:_rotateCanvas toTexture:source];
+   [blit endEncoding];
+}
+
 }
 
 - (BOOL)setShaderFromPath:(NSString *)path
@@ -2362,11 +2479,16 @@ unavailable:
    _shader                      = nil;
 
    if (!path)
+      [self _applyJoyemuScreenRotation:ctx inPlace:NO];
    {
       _drawState = ViewDrawStateEncoder;
       [self _logShaderRenderStateIfNeeded];
       return YES;
    }
+   /* Shader passes sample the frame texture itself; rotate it there so the picture matches the
+    * host's rotated touch mapping. */
+   [self _applyJoyemuScreenRotation:ctx inPlace:YES];
+
 
    struct video_shader *shader  = (struct video_shader *)calloc(1, sizeof(*shader));
    settings_t        *settings  = config_get_ptr();

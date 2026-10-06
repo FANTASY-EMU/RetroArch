@@ -48,10 +48,21 @@ static inline uint64_t joyemu_nds_pacing_completed(uint64_t last_us, uint64_t no
  if (!last_us || layout_changed || now_us < last_us || !interval_us) return now_us;
  return now_us - (now_us-last_us) % interval_us;
 }
+/* Host-side screen rotation, applied to the composed frame before presentation.
+ * `rect` are the unrotated screen rects in canvas pixels (as sent to the core);
+ * each turns by `degrees` about its centre. Ignored unless the frame matches the
+ * canvas size, so stale settings never distort another layout. */
+struct joyemu_screen_rotation {
+ uint32_t canvas_width, canvas_height;
+ struct joyemu_nds_rect rect[2];
+ float degrees[2];
+};
 #ifdef __cplusplus
 extern "C" {
 #endif
 bool joyemu_metal_stage_nds_frame(struct joyemu_nds_native_frame *frame);
+/* NULL or all-zero angles turn the pass off. Thread-safe. */
+void joyemu_metal_set_screen_rotation(const struct joyemu_screen_rotation *rotation);
 #ifdef __cplusplus
 }
 #endif
