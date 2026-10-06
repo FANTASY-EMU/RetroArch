@@ -139,6 +139,13 @@ int driver_find_index(const char *label, const char *drv);
  * audio and video drivers instead. */
 void driver_set_nonblock_state(void);
 
+/* JoyEMU independent external-display presentation must not let a 30 Hz
+ * virtual display pace the emulator's video driver. This override affects
+ * video only; audio/input pacing remains owned by the existing runloop
+ * state. */
+void joyemu_driver_set_external_display_video_nonblock(bool enabled);
+bool joyemu_driver_external_display_video_nonblock_enabled(void);
+
 /**
  * drivers_init:
  * @flags              : Bitmask of drivers to initialize.

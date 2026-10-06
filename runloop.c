@@ -97,6 +97,22 @@ extern void joyemu_psp_vm_guard_trace_handoff(
       const char *stage, const char *core_path) __attribute__((weak_import));
 #endif
 
+#if defined(IOS) && defined(JOYENGINE_V2)
+extern void joyemu_external_display_presentation_did_change(void);
+static void runloop_notify_video_geometry_changed(void)
+{
+   joyemu_external_display_presentation_did_change();
+}
+#if defined(DEBUG)
+void joyemu_runloop_notify_video_geometry_changed_for_testing(void)
+{
+   runloop_notify_video_geometry_changed();
+}
+#endif
+#else
+static void runloop_notify_video_geometry_changed(void) { }
+#endif
+
 #ifdef EMSCRIPTEN
 #include <emscripten/emscripten.h>
 #endif
@@ -2942,7 +2958,10 @@ bool runloop_environment_cb(unsigned cmd, void *data)
             command_event(CMD_EVENT_REINIT, &reinit_flags);
 
             if (no_video_reinit)
+            {
                video_driver_set_aspect_ratio();
+               runloop_notify_video_geometry_changed();
+            }
 
             if (video_switch_refresh_rate)
                video_display_server_set_refresh_rate(refresh_rate);
@@ -3196,6 +3215,7 @@ bool runloop_environment_cb(unsigned cmd, void *data)
             /* Forces recomputation of aspect ratios if
              * using core-dependent aspect ratios. */
             video_driver_set_aspect_ratio();
+            runloop_notify_video_geometry_changed();
 
             /* Ignore frame delay target temporarily */
             if (video_frame_delay_auto)

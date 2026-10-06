@@ -134,6 +134,56 @@ static CGSize joyemu_metal_resolve_viewport_size(
    return CGSizeZero;
 }
 
+static CGFloat joyemu_metal_resolve_attached_render_pixel_scale(
+      CGFloat window_native_scale,
+      CGFloat fallback_render_pixel_scale)
+{
+   if (isfinite(window_native_scale) && window_native_scale > 0.0)
+      return window_native_scale;
+
+   if (isfinite(fallback_render_pixel_scale) && fallback_render_pixel_scale > 0.0)
+      return fallback_render_pixel_scale;
+
+   return 1.0;
+}
+
+static CGSize joyemu_metal_cap_viewport_size(
+      CGSize viewport_size,
+      CGSize maximum_drawable_size)
+{
+   if (!joyemu_metal_size_is_valid(viewport_size))
+      return CGSizeZero;
+
+   if (!joyemu_metal_size_is_valid(maximum_drawable_size))
+      return viewport_size;
+
+   CGFloat scale = MIN(1.0,
+         MIN(maximum_drawable_size.width / viewport_size.width,
+             maximum_drawable_size.height / viewport_size.height));
+   return CGSizeMake(floor(viewport_size.width * scale),
+         floor(viewport_size.height * scale));
+}
+
+static CGSize joyemu_metal_resolve_attached_viewport_size(
+      CGSize incoming_drawable_size,
+      CGSize view_bounds_size,
+      CGFloat window_native_scale,
+      CGFloat fallback_render_pixel_scale,
+      CGSize maximum_drawable_size)
+{
+   CGFloat render_pixel_scale =
+         joyemu_metal_resolve_attached_render_pixel_scale(
+               window_native_scale,
+               fallback_render_pixel_scale);
+   CGSize viewport_size = joyemu_metal_resolve_viewport_size(
+         incoming_drawable_size,
+         view_bounds_size,
+         render_pixel_scale);
+   return joyemu_metal_cap_viewport_size(
+         viewport_size,
+         maximum_drawable_size);
+}
+
 #if defined(DEBUG)
 CGSize joyemu_metal_resolve_viewport_size_for_testing(
       CGSize incoming_drawable_size,
@@ -144,6 +194,21 @@ CGSize joyemu_metal_resolve_viewport_size_for_testing(
          incoming_drawable_size,
          view_bounds_size,
          render_pixel_scale);
+}
+
+CGSize joyemu_metal_resolve_attached_viewport_size_for_testing(
+      CGSize incoming_drawable_size,
+      CGSize view_bounds_size,
+      CGFloat window_native_scale,
+      CGFloat fallback_render_pixel_scale,
+      CGSize maximum_drawable_size)
+{
+   return joyemu_metal_resolve_attached_viewport_size(
+         incoming_drawable_size,
+         view_bounds_size,
+         window_native_scale,
+         fallback_render_pixel_scale,
+         maximum_drawable_size);
 }
 #endif
 
@@ -817,6 +882,14 @@ font_renderer_t metal_raster_font = {
  * VIDEO DRIVER
  */
 
+@interface MetalView ()
+@property(nonatomic) CGSize joyExternalDisplayMaximumDrawableSize;
+@end
+
+@interface MetalDriver (JoyEMUExternalDisplay)
+- (BOOL)joyemuUsesRGB32SoftwareFrame;
+@end
+
 @implementation MetalView
 
 #if !defined(HAVE_COCOATOUCH)
@@ -896,6 +969,11 @@ font_renderer_t metal_raster_font = {
    CGRect _skinVideoPrimaryFrame;
    NSArray<NSValue *> *_skinVideoEffectFrames;
    SkinVideoEffectUniforms _skinVideoEffectUniforms;
+}
+
+- (BOOL)joyemuUsesRGB32SoftwareFrame
+{
+   return _video.rgb32;
 }
 
 - (instancetype)initWithVideo:(const video_info_t *)video
@@ -1502,21 +1580,60 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size
 {
 #ifdef HAVE_COCOATOUCH
-    CGFloat render_pixel_scale = cocoa_screen_get_render_pixel_scale();
-    if (!isfinite(render_pixel_scale) || render_pixel_scale <= 0.0)
-       render_pixel_scale = 1.0;
+    UIScreen *window_screen = view.window.screen;
+    CGSize maximum_drawable_size = CGSizeZero;
+    if ([view isKindOfClass:[MetalView class]])
+       maximum_drawable_size =
+             ((MetalView *)view).joyExternalDisplayMaximumDrawableSize;
 
-    CGSize requested_size = joyemu_metal_resolve_viewport_size(
-          size,
-          view.bounds.size,
-          render_pixel_scale);
+    BOOL is_external_display_lease =
+          joyemu_metal_size_is_valid(maximum_drawable_size);
+    CGFloat fallback_render_pixel_scale =
+          cocoa_screen_get_render_pixel_scale();
+    CGFloat window_native_scale = 0.0;
+    CGFloat render_pixel_scale = fallback_render_pixel_scale;
+    CGSize requested_size;
+    if (is_external_display_lease)
+    {
+       fallback_render_pixel_scale = window_screen
+             ? window_screen.scale
+             : fallback_render_pixel_scale;
+       window_native_scale = window_screen
+             ? window_screen.nativeScale
+             : 0.0;
+       render_pixel_scale =
+             joyemu_metal_resolve_attached_render_pixel_scale(
+                   window_native_scale,
+                   fallback_render_pixel_scale);
+       requested_size = joyemu_metal_resolve_attached_viewport_size(
+             size,
+             view.bounds.size,
+             window_native_scale,
+             fallback_render_pixel_scale,
+             maximum_drawable_size);
+    }
+    else
+    {
+       if (!isfinite(render_pixel_scale) || render_pixel_scale <= 0.0)
+          render_pixel_scale = 1.0;
+       requested_size = joyemu_metal_resolve_viewport_size(
+             size,
+             view.bounds.size,
+             render_pixel_scale);
+    }
     unsigned requested_width = (unsigned)requested_size.width;
     unsigned requested_height = (unsigned)requested_size.height;
     if (joyemu_metal_nds_touch_diag_enabled())
     {
-       UIScreen *screen = [UIScreen mainScreen];
-       NSString *source = joyemu_metal_size_is_valid(view.bounds.size) ? @"boundsRenderPixelScale" : @"incomingDrawableFallback";
-       NSLog(@"[NDS_TOUCH_DIAG][Metal] drawableSizeWillChange bounds=(w=%.3f,h=%.3f) incomingDrawable=(w=%.3f,h=%.3f) source=%@ renderPixelScale=%.6f screenScale=%.6f nativeScale=%.6f requested=%ux%u",
+       UIScreen *screen = window_screen ?: [UIScreen mainScreen];
+       NSString *source;
+       if (!joyemu_metal_size_is_valid(view.bounds.size))
+          source = @"incomingDrawableFallback";
+       else if (is_external_display_lease)
+          source = @"externalWindowBoundsNativeScale";
+       else
+          source = @"boundsRenderPixelScale";
+       NSLog(@"[NDS_TOUCH_DIAG][Metal] drawableSizeWillChange bounds=(w=%.3f,h=%.3f) incomingDrawable=(w=%.3f,h=%.3f) source=%@ renderPixelScale=%.6f screenScale=%.6f nativeScale=%.6f maximumDrawable=(w=%.3f,h=%.3f) requested=%ux%u",
              view.bounds.size.width,
              view.bounds.size.height,
              size.width,
@@ -1525,6 +1642,8 @@ static float JEClampedSkinVideoEffectValue(CGFloat value, float fallback, float 
              render_pixel_scale,
              screen.scale,
              screen.nativeScale,
+             maximum_drawable_size.width,
+             maximum_drawable_size.height,
              requested_width,
              requested_height);
     }
@@ -2909,6 +3028,21 @@ static bool metal_frame(void *data, const void *frame,
       video_frame_info_t *video_info)
 {
    MetalDriver *md = (__bridge MetalDriver *)data;
+#if TARGET_OS_IPHONE && defined(HAVE_COCOATOUCH)
+   if (frame
+       && frame != RETRO_HW_FRAME_BUFFER_VALID
+       && frame_width > 0
+       && frame_height > 0
+       && pitch > 0)
+   {
+      joyemu_external_display_submit_software_frame(
+            frame,
+            frame_width,
+            frame_height,
+            pitch,
+            [md joyemuUsesRGB32SoftwareFrame]);
+   }
+#endif
    return [md renderFrame:frame
                      data:data
                     width:frame_width

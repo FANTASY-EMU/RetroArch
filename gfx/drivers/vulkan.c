@@ -17,6 +17,9 @@
 #include <stdint.h>
 #include <math.h>
 #include <string.h>
+#if defined(IOS) && defined(JOYENGINE_V2)
+#include <dlfcn.h>
+#endif
 
 #include <retro_assert.h>
 #include <encodings/utf.h>
@@ -55,6 +58,55 @@
 #include "../../retroarch.h"
 #include "../../verbosity.h"
 #include "../../joyemu_cadence_trace_compat.h"
+
+#if defined(IOS) && defined(JOYENGINE_V2)
+#include "../../ui/drivers/cocoa/apple_platform.h"
+
+typedef void (VKAPI_PTR *joyemu_vk_get_metal_texture_fn)(
+      VkImage image,
+      void **metal_texture);
+typedef void (VKAPI_PTR *joyemu_vk_get_metal_command_queue_fn)(
+      VkQueue queue,
+      void **metal_command_queue);
+
+static bool joyemu_vulkan_get_metal_objects(
+      VkImage image,
+      VkQueue queue,
+      void **metal_texture,
+      void **metal_command_queue)
+{
+   static bool did_resolve;
+   static joyemu_vk_get_metal_texture_fn get_texture;
+   static joyemu_vk_get_metal_command_queue_fn get_command_queue;
+
+   if (!metal_texture || !metal_command_queue)
+      return false;
+
+   *metal_texture       = NULL;
+   *metal_command_queue = NULL;
+
+   if (!did_resolve)
+   {
+      void *texture_symbol =
+         dlsym(RTLD_DEFAULT, "vkGetMTLTextureMVK");
+      void *command_queue_symbol =
+         dlsym(RTLD_DEFAULT, "vkGetMTLCommandQueueMVK");
+      memcpy(&get_texture, &texture_symbol, sizeof(get_texture));
+      memcpy(
+            &get_command_queue,
+            &command_queue_symbol,
+            sizeof(get_command_queue));
+      did_resolve = true;
+   }
+
+   if (!get_texture || !get_command_queue)
+      return false;
+
+   get_texture(image, metal_texture);
+   get_command_queue(queue, metal_command_queue);
+   return *metal_texture && *metal_command_queue;
+}
+#endif
 
 #define VK_REMAP_TO_TEXFMT(fmt) ((fmt == VK_FORMAT_R5G6B5_UNORM_PACK16) ? VK_FORMAT_R8G8B8A8_UNORM : fmt)
 
@@ -98,6 +150,18 @@ struct vk_image
    VkFramebuffer framebuffer;    /* ptr alignment */
    VkDeviceMemory memory;        /* ptr alignment */
 };
+
+#if defined(IOS) && defined(JOYENGINE_V2)
+struct vk_external_capture
+{
+   VkImage image;                /* ptr alignment */
+   VkDeviceMemory memory;        /* ptr alignment */
+   VkImageLayout layout;         /* enum alignment */
+   VkFormat format;              /* enum alignment */
+   uint32_t width;
+   uint32_t height;
+};
+#endif
 
 struct vk_texture
 {
@@ -189,6 +253,10 @@ typedef struct vk
    float translate_y;
    struct vk_per_frame swapchain[VULKAN_MAX_SWAPCHAIN_IMAGES];
    struct vk_image backbuffers[VULKAN_MAX_SWAPCHAIN_IMAGES];
+#if defined(IOS) && defined(JOYENGINE_V2)
+   struct vk_external_capture
+      external_captures[VULKAN_MAX_SWAPCHAIN_IMAGES];
+#endif
    struct vk_texture default_texture;
 
    /* Currently active command buffer. */
@@ -2972,9 +3040,41 @@ if (vk->context->flags & VK_CTX_FLAG_HDR_SUPPORT)
             vk->display.pipelines[i], NULL);
 }
 
+#if defined(IOS) && defined(JOYENGINE_V2)
+static void vulkan_destroy_external_capture(
+      VkDevice device,
+      struct vk_external_capture *capture)
+{
+   if (!capture)
+      return;
+   if (capture->image != VK_NULL_HANDLE)
+      vkDestroyImage(device, capture->image, NULL);
+   if (capture->memory != VK_NULL_HANDLE)
+      vkFreeMemory(device, capture->memory, NULL);
+   memset(capture, 0, sizeof(*capture));
+}
+
+static void vulkan_destroy_external_captures(vk_t *vk)
+{
+   unsigned i;
+   for (i = 0; i < VULKAN_MAX_SWAPCHAIN_IMAGES; i++)
+      vulkan_destroy_external_capture(
+            vk->context->device,
+            &vk->external_captures[i]);
+}
+#endif
+
 static void vulkan_deinit_framebuffers(vk_t *vk)
 {
    int i;
+#if defined(IOS) && defined(JOYENGINE_V2)
+   /*
+    * Swapchain recreation is already preceded by vkQueueWaitIdle().
+    * Tear down capture images at the same lifecycle boundary so a capture
+    * can never outlive the dimensions/format of the source swapchain.
+    */
+   vulkan_destroy_external_captures(vk);
+#endif
    for (i = 0; i < (int) vk->num_swapchain_images; i++)
    {
       if (vk->backbuffers[i].framebuffer)
@@ -4586,6 +4686,342 @@ static void vulkan_run_hdr_pipeline(VkPipeline pipeline, VkRenderPass render_pas
    vkCmdEndRenderPass(vk->cmd);
 }
 
+enum vulkan_resize_stage
+{
+   VULKAN_RESIZE_STAGE_NONE = 0,
+   VULKAN_RESIZE_STAGE_BEFORE_SUBMISSION,
+   VULKAN_RESIZE_STAGE_AFTER_SUBMISSION
+};
+
+static unsigned vulkan_get_resize_stage(
+      bool resize_pending,
+      unsigned current_width,
+      unsigned current_height,
+      unsigned requested_width,
+      unsigned requested_height)
+{
+   if (!resize_pending)
+      return VULKAN_RESIZE_STAGE_NONE;
+
+#if defined(IOS) && defined(JOYENGINE_V2)
+   /* CAMetalLayer updates its attachments synchronously when an external
+    * display is disconnected. Submitting the previous, larger render target
+    * before recreating the swapchain then fails Metal validation. Growing is
+    * safe for one frame and retains the existing end-of-frame resize path. */
+   if (      requested_width  < current_width
+         || requested_height < current_height)
+      return VULKAN_RESIZE_STAGE_BEFORE_SUBMISSION;
+#endif
+
+   return VULKAN_RESIZE_STAGE_AFTER_SUBMISSION;
+}
+
+#if defined(DEBUG) && defined(IOS) && defined(JOYENGINE_V2)
+__attribute__((used, visibility("default")))
+unsigned joyemu_vulkan_resize_stage_for_testing(
+      bool resize_pending,
+      unsigned current_width,
+      unsigned current_height,
+      unsigned requested_width,
+      unsigned requested_height)
+{
+   return vulkan_get_resize_stage(
+         resize_pending,
+         current_width,
+         current_height,
+         requested_width,
+         requested_height);
+}
+#endif
+
+static void vulkan_process_pending_resize(
+      vk_t *vk,
+      unsigned width,
+      unsigned height,
+      unsigned video_width,
+      unsigned video_height,
+      video_frame_info_t *video_info)
+{
+   bool resize_pending = (vk->flags & VK_FLAG_SHOULD_RESIZE) != 0;
+#ifdef VULKAN_HDR_SWAPCHAIN
+   bool video_hdr_enable =
+         video_driver_supports_hdr() && video_info->hdr_enable;
+   resize_pending =
+         resize_pending
+         || (((vk->context->flags & VK_CTX_FLAG_HDR_ENABLE) > 0)
+         != video_hdr_enable);
+#endif
+
+   if (resize_pending)
+   {
+#ifdef VULKAN_HDR_SWAPCHAIN
+      if (video_hdr_enable)
+      {
+         vk->context->flags |= VK_CTX_FLAG_HDR_ENABLE;
+#ifdef HAVE_THREADS
+         slock_lock(vk->context->queue_lock);
+#endif
+         vkQueueWaitIdle(vk->context->queue);
+#ifdef HAVE_THREADS
+         slock_unlock(vk->context->queue_lock);
+#endif
+         vulkan_destroy_hdr_buffer(
+               vk->context->device, &vk->main_buffer);
+         vulkan_destroy_hdr_buffer(
+               vk->context->device, &vk->readback_image);
+      }
+      else
+         vk->context->flags &= ~VK_CTX_FLAG_HDR_ENABLE;
+#endif /* VULKAN_HDR_SWAPCHAIN */
+
+      if (vk->ctx_driver->set_resize)
+         vk->ctx_driver->set_resize(vk->ctx_data, width, height);
+
+#ifdef VULKAN_HDR_SWAPCHAIN
+      if (vk->context->flags & VK_CTX_FLAG_HDR_ENABLE)
+      {
+         /* Create intermediary buffer to render filter chain output to */
+         vulkan_init_render_target(
+               &vk->main_buffer,
+               video_width,
+               video_height,
+               vk->context->swapchain_format,
+               vk->render_pass,
+               vk->context);
+         /* Create image for readback target in bgra8 format */
+         vulkan_init_render_target(
+               &vk->readback_image,
+               video_width,
+               video_height,
+               VK_FORMAT_B8G8R8A8_UNORM,
+               vk->readback_render_pass,
+               vk->context);
+      }
+#endif /* VULKAN_HDR_SWAPCHAIN */
+      vk->flags &= ~VK_FLAG_SHOULD_RESIZE;
+   }
+
+   if (vk->context->flags & VK_CTX_FLAG_INVALID_SWAPCHAIN)
+      vulkan_check_swapchain(vk);
+}
+
+#if defined(IOS) && defined(JOYENGINE_V2)
+static struct vk_external_capture *vulkan_prepare_external_capture(
+      vk_t *vk,
+      unsigned swapchain_index)
+{
+   VkMemoryRequirements memory_requirements;
+   VkMemoryAllocateInfo allocation_info;
+   VkImageCreateInfo image_info;
+   struct vk_external_capture *capture;
+   VkResult result;
+
+   if (swapchain_index >= VULKAN_MAX_SWAPCHAIN_IMAGES)
+      return NULL;
+
+   capture = &vk->external_captures[swapchain_index];
+   if (capture->image != VK_NULL_HANDLE)
+   {
+      if (   capture->width == vk->context->swapchain_width
+          && capture->height == vk->context->swapchain_height
+          && capture->format == vk->context->swapchain_format)
+         return capture;
+
+      /*
+       * A normal swapchain resize destroys these images after queue idle.
+       * Refuse an unexpected mismatch instead of destroying a resource that
+       * could still be referenced by an already-submitted Metal copy.
+       */
+      RARCH_ERR(
+            "[JoyEmu][VulkanCapture] stale capture dimensions "
+            "capture=%ux%u requested=%ux%u\n",
+            capture->width,
+            capture->height,
+            vk->context->swapchain_width,
+            vk->context->swapchain_height);
+      return NULL;
+   }
+
+   memset(&image_info, 0, sizeof(image_info));
+   image_info.sType                 = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+   image_info.imageType             = VK_IMAGE_TYPE_2D;
+   image_info.format                = vk->context->swapchain_format;
+   image_info.extent.width          = vk->context->swapchain_width;
+   image_info.extent.height         = vk->context->swapchain_height;
+   image_info.extent.depth          = 1;
+   image_info.mipLevels             = 1;
+   image_info.arrayLayers           = 1;
+   image_info.samples               = VK_SAMPLE_COUNT_1_BIT;
+   image_info.tiling                = VK_IMAGE_TILING_OPTIMAL;
+   image_info.usage                 =
+         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+   image_info.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
+   image_info.initialLayout         = VK_IMAGE_LAYOUT_UNDEFINED;
+
+   result = vkCreateImage(
+         vk->context->device,
+         &image_info,
+         NULL,
+         &capture->image);
+   if (result != VK_SUCCESS)
+      goto error;
+
+   vkGetImageMemoryRequirements(
+         vk->context->device,
+         capture->image,
+         &memory_requirements);
+
+   memset(&allocation_info, 0, sizeof(allocation_info));
+   allocation_info.sType           =
+         VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+   allocation_info.allocationSize  = memory_requirements.size;
+   allocation_info.memoryTypeIndex = vulkan_find_memory_type(
+         &vk->context->memory_properties,
+         memory_requirements.memoryTypeBits,
+         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+   result = vkAllocateMemory(
+         vk->context->device,
+         &allocation_info,
+         NULL,
+         &capture->memory);
+   if (result != VK_SUCCESS)
+      goto error;
+
+   result = vkBindImageMemory(
+         vk->context->device,
+         capture->image,
+         capture->memory,
+         0);
+   if (result != VK_SUCCESS)
+      goto error;
+
+   capture->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+   capture->format = vk->context->swapchain_format;
+   capture->width  = vk->context->swapchain_width;
+   capture->height = vk->context->swapchain_height;
+   vulkan_debug_mark_image(vk->context->device, capture->image);
+   vulkan_debug_mark_memory(vk->context->device, capture->memory);
+   return capture;
+
+error:
+   RARCH_ERR(
+         "[JoyEmu][VulkanCapture] failed to allocate owned capture image "
+         "result=%d\n",
+         (int)result);
+   vulkan_destroy_external_capture(vk->context->device, capture);
+   return NULL;
+}
+
+static struct vk_external_capture *vulkan_record_external_capture(
+      vk_t *vk,
+      struct vk_image *backbuffer,
+      unsigned swapchain_index)
+{
+   VkImageCopy region;
+   VkAccessFlags old_access;
+   VkPipelineStageFlags old_stage;
+   struct vk_external_capture *capture =
+      vulkan_prepare_external_capture(vk, swapchain_index);
+
+   if (!capture)
+      return NULL;
+
+   old_access = capture->layout == VK_IMAGE_LAYOUT_UNDEFINED
+      ? 0
+      : VK_ACCESS_MEMORY_READ_BIT;
+   old_stage = capture->layout == VK_IMAGE_LAYOUT_UNDEFINED
+      ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+      : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+   VULKAN_IMAGE_LAYOUT_TRANSITION(
+         vk->cmd,
+         capture->image,
+         capture->layout,
+         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+         old_access,
+         VK_ACCESS_TRANSFER_WRITE_BIT,
+         old_stage,
+         VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+   memset(&region, 0, sizeof(region));
+   region.srcSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+   region.srcSubresource.layerCount     = 1;
+   region.dstSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+   region.dstSubresource.layerCount     = 1;
+   region.extent.width                  = capture->width;
+   region.extent.height                 = capture->height;
+   region.extent.depth                  = 1;
+
+   /*
+    * Keep the copy inside Vulkan while the final backbuffer is in an
+    * explicit transfer layout. Reading a swapchain drawable later through
+    * Metal is outside Vulkan's layout/presentation contract and produced
+    * completed-but-black frames with PPSSPP.
+    */
+   vkCmdCopyImage(
+         vk->cmd,
+         backbuffer->image,
+         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+         capture->image,
+         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+         1,
+         &region);
+
+   VULKAN_IMAGE_LAYOUT_TRANSITION(
+         vk->cmd,
+         capture->image,
+         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+         VK_IMAGE_LAYOUT_GENERAL,
+         VK_ACCESS_TRANSFER_WRITE_BIT,
+         VK_ACCESS_MEMORY_READ_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT,
+         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+   capture->layout = VK_IMAGE_LAYOUT_GENERAL;
+   return capture;
+}
+
+static void vulkan_external_capture_normalized_viewport(
+      const vk_t *vk,
+      const struct vk_external_capture *capture,
+      float *x,
+      float *y,
+      float *width,
+      float *height)
+{
+   float left;
+   float top;
+   float right;
+   float bottom;
+
+   if (!x || !y || !width || !height)
+      return;
+
+   *x      = 0.0f;
+   *y      = 0.0f;
+   *width  = 1.0f;
+   *height = 1.0f;
+   if (!vk || !capture || !capture->width || !capture->height)
+      return;
+
+   left   = MAX((float)vk->vp.x, 0.0f);
+   top    = MAX((float)vk->vp.y, 0.0f);
+   right  = MIN(
+         (float)vk->vp.x + (float)vk->vp.width,
+         (float)capture->width);
+   bottom = MIN(
+         (float)vk->vp.y + (float)vk->vp.height,
+         (float)capture->height);
+   if (right <= left || bottom <= top)
+      return;
+
+   *x      = left / (float)capture->width;
+   *y      = top / (float)capture->height;
+   *width  = (right - left) / (float)capture->width;
+   *height = (bottom - top) / (float)capture->height;
+}
+#endif
+
 static bool vulkan_frame(void *data, const void *frame,
       unsigned frame_width, unsigned frame_height,
       uint64_t frame_count,
@@ -4620,12 +5056,14 @@ static bool vulkan_frame(void *data, const void *frame,
 #ifdef HAVE_GFX_WIDGETS
    bool widgets_active                           = video_info->widgets_active;
 #endif
-   unsigned frame_index                          =
-      vk->context->current_frame_index;
-   unsigned swapchain_index                      =
-      vk->context->current_swapchain_index;
+   unsigned frame_index;
+   unsigned swapchain_index;
    bool overlay_behind_menu                      = video_info->overlay_behind_menu;
    bool use_main_buffer                          = true;
+#if defined(IOS) && defined(JOYENGINE_V2)
+   bool external_capture_requested               = false;
+   struct vk_external_capture *external_capture  = NULL;
+#endif
 
    /* Fast toggle shader filter chain logic */
    filter_chain = vk->filter_chain;
@@ -4644,6 +5082,31 @@ static bool vulkan_frame(void *data, const void *frame,
    if (!filter_chain && vk->filter_chain_default)
       filter_chain = vk->filter_chain_default;
 
+#if defined(IOS) && defined(JOYENGINE_V2)
+   if (vulkan_get_resize_stage(
+            (vk->flags & VK_FLAG_SHOULD_RESIZE) != 0,
+            vk->context->swapchain_width,
+            vk->context->swapchain_height,
+            width,
+            height) == VULKAN_RESIZE_STAGE_BEFORE_SUBMISSION)
+   {
+      RARCH_LOG(
+            "[JoyEmu][VulkanResize] stage=pre_submit current=%ux%u "
+            "requested=%ux%u\n",
+            vk->context->swapchain_width,
+            vk->context->swapchain_height,
+            width,
+            height);
+      vulkan_process_pending_resize(
+            vk,
+            width,
+            height,
+            video_width,
+            video_height,
+            video_info);
+   }
+#endif
+
 #ifdef VULKAN_HDR_SWAPCHAIN
    use_main_buffer                               =
          ( vk->context->flags & VK_CTX_FLAG_HDR_ENABLE)
@@ -4651,6 +5114,10 @@ static bool vulkan_frame(void *data, const void *frame,
 #endif /* VULKAN_HDR_SWAPCHAIN */
 
    /* Bookkeeping on start of frame. */
+   frame_index                                   =
+      vk->context->current_frame_index;
+   swapchain_index                               =
+      vk->context->current_swapchain_index;
    struct vk_per_frame *chain                    = &vk->swapchain[frame_index];
    struct vk_image *backbuffer                   = &vk->backbuffers[swapchain_index];
    struct vk_descriptor_manager *manager         = &chain->descriptor_manager;
@@ -5053,8 +5520,14 @@ static bool vulkan_frame(void *data, const void *frame,
 
    /* End the filter chain frame.
     * This must happen outside a render pass.
-    */
+   */
    vulkan_filter_chain_end_frame((vulkan_filter_chain_t*)filter_chain, vk->cmd);
+
+#if defined(IOS) && defined(JOYENGINE_V2)
+   joyemu_external_display_observe_vulkan_frame_source();
+   external_capture_requested =
+      joyemu_external_display_wants_vulkan_frames();
+#endif
 
    if (
             (backbuffer->image != VK_NULL_HANDLE)
@@ -5108,6 +5581,14 @@ static bool vulkan_frame(void *data, const void *frame,
 
          vulkan_readback(vk, readback_source);
 
+#if defined(IOS) && defined(JOYENGINE_V2)
+         if (external_capture_requested)
+            external_capture = vulkan_record_external_capture(
+                  vk,
+                  backbuffer,
+                  swapchain_index);
+#endif
+
          /* Prepare for presentation after transfers are complete. */
          VULKAN_IMAGE_LAYOUT_TRANSITION(
                vk->cmd,
@@ -5121,6 +5602,35 @@ static bool vulkan_frame(void *data, const void *frame,
 
          vk->flags &= ~VK_FLAG_READBACK_PENDING;
       }
+#if defined(IOS) && defined(JOYENGINE_V2)
+      else if (external_capture_requested)
+      {
+         VULKAN_IMAGE_LAYOUT_TRANSITION(
+               vk->cmd,
+               backbuffer->image,
+               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+               VK_ACCESS_TRANSFER_READ_BIT,
+               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+               VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+         external_capture = vulkan_record_external_capture(
+               vk,
+               backbuffer,
+               swapchain_index);
+
+         VULKAN_IMAGE_LAYOUT_TRANSITION(
+               vk->cmd,
+               backbuffer->image,
+               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+               VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+               VK_ACCESS_TRANSFER_READ_BIT,
+               VK_ACCESS_MEMORY_READ_BIT,
+               VK_PIPELINE_STAGE_TRANSFER_BIT,
+               VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+      }
+#endif
       else
       {
          /* Prepare backbuffer for presentation. */
@@ -5236,6 +5746,39 @@ static bool vulkan_frame(void *data, const void *frame,
    vkQueueSubmit(vk->context->queue, 1,
          &submit_info, vk->context->swapchain_fences[frame_index]);
    vk->context->swapchain_fences_signalled[frame_index] = true;
+
+#if defined(IOS) && defined(JOYENGINE_V2)
+   if (external_capture)
+   {
+      struct vk_external_capture *capture = external_capture;
+      void *metal_texture       = NULL;
+      void *metal_command_queue = NULL;
+      float video_viewport_x;
+      float video_viewport_y;
+      float video_viewport_width;
+      float video_viewport_height;
+      vulkan_external_capture_normalized_viewport(
+            vk,
+            capture,
+            &video_viewport_x,
+            &video_viewport_y,
+            &video_viewport_width,
+            &video_viewport_height);
+      if (joyemu_vulkan_get_metal_objects(
+               capture->image,
+               vk->context->queue,
+               &metal_texture,
+               &metal_command_queue))
+         joyemu_external_display_submit_vulkan_frame(
+               metal_texture,
+               metal_command_queue,
+               video_viewport_x,
+               video_viewport_y,
+               video_viewport_width,
+               video_viewport_height);
+   }
+#endif
+
 #ifdef HAVE_THREADS
    slock_unlock(vk->context->queue_lock);
 #endif
@@ -5251,59 +5794,16 @@ static bool vulkan_frame(void *data, const void *frame,
          vk->ctx_driver->update_window_title(vk->ctx_data);
    }
 
-   /* Handle spurious swapchain invalidations as soon as we can,
-    * i.e. right after swap buffers. */
-#ifdef VULKAN_HDR_SWAPCHAIN
-   bool video_hdr_enable = video_driver_supports_hdr() && video_info->hdr_enable;
-   if (       (vk->flags & VK_FLAG_SHOULD_RESIZE)
-         || (((vk->context->flags & VK_CTX_FLAG_HDR_ENABLE) > 0)
-         != video_hdr_enable))
-#else
-   if (vk->flags & VK_FLAG_SHOULD_RESIZE)
-#endif /* VULKAN_HDR_SWAPCHAIN */
-   {
-#ifdef VULKAN_HDR_SWAPCHAIN
-      if (video_hdr_enable)
-      {
-         vk->context->flags |= VK_CTX_FLAG_HDR_ENABLE;
-#ifdef HAVE_THREADS
-         slock_lock(vk->context->queue_lock);
-#endif
-         vkQueueWaitIdle(vk->context->queue);
-#ifdef HAVE_THREADS
-         slock_unlock(vk->context->queue_lock);
-#endif
-         vulkan_destroy_hdr_buffer(vk->context->device, &vk->main_buffer);
-         vulkan_destroy_hdr_buffer(vk->context->device, &vk->readback_image);
-      }
-      else
-         vk->context->flags &= ~VK_CTX_FLAG_HDR_ENABLE;
-
-#endif /* VULKAN_HDR_SWAPCHAIN */
-
-      gfx_ctx_mode_t mode;
-      mode.width  = width;
-      mode.height = height;
-
-      if (vk->ctx_driver->set_resize)
-         vk->ctx_driver->set_resize(vk->ctx_data, mode.width, mode.height);
-
-#ifdef VULKAN_HDR_SWAPCHAIN
-      if (vk->context->flags & VK_CTX_FLAG_HDR_ENABLE)
-      {
-         /* Create intermediary buffer to render filter chain output to */
-         vulkan_init_render_target(&vk->main_buffer, video_width, video_height,
-                                  vk->context->swapchain_format, vk->render_pass, vk->context);
-         /* Create image for readback target in bgra8 format */
-         vulkan_init_render_target(&vk->readback_image, video_width, video_height,
-                                    VK_FORMAT_B8G8R8A8_UNORM, vk->readback_render_pass, vk->context);
-      }
-#endif /* VULKAN_HDR_SWAPCHAIN */
-      vk->flags &= ~VK_FLAG_SHOULD_RESIZE;
-   }
-
-   if (vk->context->flags & VK_CTX_FLAG_INVALID_SWAPCHAIN)
-      vulkan_check_swapchain(vk);
+   /* Handle growth and spurious invalidations after the submitted frame.
+    * JoyEngine iOS shrink transitions were already handled before submission,
+    * because their CAMetalLayer attachments become smaller synchronously. */
+   vulkan_process_pending_resize(
+         vk,
+         width,
+         height,
+         video_width,
+         video_height,
+         video_info);
 
    /* Disable BFI during fast forward, slow-motion,
     * pause, and menu to prevent flicker. */

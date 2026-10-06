@@ -100,6 +100,19 @@ static int cocoa_gl_fast_forward_skip_count(cocoa_ctx_data_t *cocoa_ctx)
 }
 #endif
 
+static bool cocoa_gl_context_creation_needed(bool has_context)
+{
+   return !has_context;
+}
+
+#if defined(DEBUG) && defined(HAVE_COCOATOUCH)
+bool joyemu_cocoa_gl_context_creation_needed_for_testing(
+      bool has_existing_context)
+{
+   return cocoa_gl_context_creation_needed(has_existing_context);
+}
+#endif
+
 /* Forward declaration */
 CocoaView *cocoaview_get(void);
 
@@ -548,25 +561,29 @@ static void *cocoa_gl_gfx_ctx_init(void *video_driver)
 static bool cocoa_gl_gfx_ctx_set_video_mode(void *data,
       unsigned width, unsigned height, bool fullscreen)
 {
+   gfx_ctx_mode_t mode;
    cocoa_ctx_data_t *cocoa_ctx = (cocoa_ctx_data_t*)data;
 
+   if (cocoa_gl_context_creation_needed(g_ctx != nil))
+   {
 #if defined(HAVE_OPENGLES3)
-   if (cocoa_ctx->flags & COCOA_CTX_FLAG_USE_HW_CTX)
-   {
-      g_hw_ctx      = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES3];
-      g_ctx         = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES3 sharegroup:g_hw_ctx.sharegroup];
-   }
-   else
-      g_ctx         = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES3];
+      if (cocoa_ctx->flags & COCOA_CTX_FLAG_USE_HW_CTX)
+      {
+         g_hw_ctx   = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES3];
+         g_ctx      = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES3 sharegroup:g_hw_ctx.sharegroup];
+      }
+      else
+         g_ctx      = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES3];
 #elif defined(HAVE_OPENGLES2)
-   if (cocoa_ctx->flags & COCOA_CTX_FLAG_USE_HW_CTX)
-   {
-      g_hw_ctx      = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES2];
-      g_ctx         = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES2 sharegroup:g_hw_ctx.sharegroup];
-   }
-   else
-      g_ctx         = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES2];
+      if (cocoa_ctx->flags & COCOA_CTX_FLAG_USE_HW_CTX)
+      {
+         g_hw_ctx   = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES2];
+         g_ctx      = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES2 sharegroup:g_hw_ctx.sharegroup];
+      }
+      else
+         g_ctx      = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES2];
 #endif
+   }
 
 #ifdef OSX
    [g_ctx makeCurrentContext];
@@ -575,6 +592,11 @@ static bool cocoa_gl_gfx_ctx_set_video_mode(void *data,
 #endif
 
    glk_view.context = g_ctx;
+
+   mode.width      = width;
+   mode.height     = height;
+   mode.fullscreen = fullscreen;
+   [apple_platform setVideoMode:mode];
 
    /* TODO: Maybe iOS users should be able to
     * show/hide the status bar here? */
@@ -606,6 +628,16 @@ static void *cocoa_gl_gfx_ctx_init(void *video_driver)
       default:
          break;
    }
+
+#if defined(HAVE_COCOATOUCH)
+   /* A full video-context reinit clears the context driver's weak global
+    * pointer, while JoyEngine intentionally keeps the platform-owned GLKView
+    * and its surface generation stable. Rebind that existing view instead of
+    * requiring setViewType: to replace it. */
+   id platform_view = apple_platform.renderView;
+   if ([platform_view isKindOfClass:[GLKView class]])
+      glk_view = (GLKView *)platform_view;
+#endif
 
    return cocoa_ctx;
 }
