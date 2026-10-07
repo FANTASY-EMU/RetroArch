@@ -6446,6 +6446,7 @@ static bool vulkan_read_viewport(void *data, uint8_t *buffer, bool is_idle)
                   "[JEVulkanReadback] Stale staging: staging=%ux%u viewport=%ux%u video=%ux%u.\n",
                   staging->width, staging->height, vk->vp.width, vk->vp.height,
                   vk->video_width, vk->video_height);
+            vk->flags &= ~VK_FLAG_READBACK_PENDING;
             vulkan_destroy_texture(vk->context->device, staging);
             joyemu_cadence_trace_end(
                   JOYEMU_CADENCE_TRACE_VULKAN_READBACK, readback_cadence_trace);
