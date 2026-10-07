@@ -6412,6 +6412,9 @@ static bool vulkan_read_viewport(void *data, uint8_t *buffer, bool is_idle)
 
       if (!staging->memory)
       {
+         /* No frame consumed the request; a later frame must not leave an
+          * orphaned staging copy sized for a different viewport. */
+         vk->flags &= ~VK_FLAG_READBACK_PENDING;
          joyemu_cadence_trace_record_vulkan_readback_missing_image();
          RARCH_ERR(
                "[JEVulkanReadback] Missing synchronous image: isIdle=%d frameIndex=%u "
@@ -6426,6 +6429,28 @@ static bool vulkan_read_viewport(void *data, uint8_t *buffer, bool is_idle)
          joyemu_cadence_trace_end(
                JOYEMU_CADENCE_TRACE_VULKAN_READBACK, readback_cadence_trace);
          return false;
+      }
+
+      {
+         unsigned vp_width  = (vk->vp.width  > vk->video_width)  ? vk->video_width  : vk->vp.width;
+         unsigned vp_height = (vk->vp.height > vk->video_height) ? vk->video_height : vk->vp.height;
+         /* A staging copy left by an earlier, unconsumed readback can be
+          * smaller than the current viewport; reading it walks off the map. */
+         if (     staging->width  != vk->vp.width
+               || staging->height != vk->vp.height
+               || !vp_width || !vp_height
+               || staging->stride < (size_t)vp_width * 4
+               || staging->size   < staging->stride * (vp_height - 1) + (size_t)vp_width * 4)
+         {
+            RARCH_ERR(
+                  "[JEVulkanReadback] Stale staging: staging=%ux%u viewport=%ux%u video=%ux%u.\n",
+                  staging->width, staging->height, vk->vp.width, vk->vp.height,
+                  vk->video_width, vk->video_height);
+            vulkan_destroy_texture(vk->context->device, staging);
+            joyemu_cadence_trace_end(
+                  JOYEMU_CADENCE_TRACE_VULKAN_READBACK, readback_cadence_trace);
+            return false;
+         }
       }
 
       if (!staging->mapped)
