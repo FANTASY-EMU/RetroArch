@@ -33,6 +33,7 @@
 
 #include "vulkan_common.h"
 #include "joyemu_vulkan_feature_policy.h"
+#include "joyemu_moltenvk_instance_policy.h"
 #include "../include/vulkan/vulkan.h"
 #include "vksym.h"
 #include <libretro_vulkan.h>
@@ -961,12 +962,15 @@ static VkInstance vulkan_context_create_instance_wrapper(void *opaque, const VkI
    gfx_ctx_vulkan_data_t *vk        = (gfx_ctx_vulkan_data_t *)opaque;
    VkInstanceCreateInfo info        = *create_info;
    VkInstance instance              = VK_NULL_HANDLE;
-   const char **instance_extensions = (const char**)malloc((info.enabledExtensionCount + 3
+   const char **instance_extensions = (const char**)malloc((info.enabledExtensionCount + 4
                                                           + ARRAY_SIZE(vulkan_optional_device_extensions)) * sizeof(const char *));
    const char **instance_layers     = (const char**)malloc((info.enabledLayerCount     + 1)                * sizeof(const char *));
 
    const char *required_extensions[3];
    uint32_t required_extension_count = 0;
+#if defined(__APPLE__)
+   joyemu_moltenvk_instance_policy_t joy_policy;
+#endif
 
    memcpy((void*)instance_extensions, info.ppEnabledExtensionNames, info.enabledExtensionCount * sizeof(const char *));
    memcpy((void*)instance_layers,     info.ppEnabledLayerNames,     info.enabledLayerCount     * sizeof(const char *));
@@ -1053,6 +1057,41 @@ static VkInstance vulkan_context_create_instance_wrapper(void *opaque, const VkI
          goto end;
       }
    }
+
+#if defined(__APPLE__)
+   if (vk->wsi_type == VULKAN_WSI_MVK_IOS)
+   {
+      if (__builtin_available(iOS 26.0, *))
+      {
+         /* Preserve the existing resource path on modern iOS. */
+      }
+      else
+      {
+         const char *setting_extension = JOYEMU_VK_LAYER_SETTINGS_EXTENSION;
+         bool has_setting_extension = false;
+         if (info.pApplicationInfo &&
+             joyemu_vulkan_should_use_discrete_resources(
+                info.pApplicationInfo->pApplicationName, true))
+         {
+            for (i = 0; i < info.enabledExtensionCount; i++)
+               if (string_is_equal(instance_extensions[i], setting_extension))
+                  has_setting_extension = true;
+            if (!has_setting_extension)
+            {
+               unsigned before = info.enabledExtensionCount;
+               if (vulkan_find_instance_extensions(instance_extensions,
+                     &info.enabledExtensionCount, NULL, 0, &setting_extension, 1))
+                  has_setting_extension = info.enabledExtensionCount > before;
+            }
+            if (joyemu_moltenvk_prepare_instance_policy(
+                  &info, &joy_policy, true, has_setting_extension))
+               RARCH_LOG("[Vulkan] PPSSPP legacy iOS: using per-instance discrete GPU resources.\n");
+            else
+               RARCH_WARN("[Vulkan] PPSSPP instance resource policy unavailable or already supplied by core.\n");
+         }
+      }
+   }
+#endif
 
    if ((res = vkCreateInstance(&info, NULL, &instance)) != VK_SUCCESS)
    {
